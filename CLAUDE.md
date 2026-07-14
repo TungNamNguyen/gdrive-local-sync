@@ -28,6 +28,7 @@ app/
     scanner.py       #   LocalFile, scan_local(), md5_of()
     gdrive.py        #   RemoteFile, OAuth helpers, DriveClient (list_tree / upload / download / trash)
     compare.py       #   compare_maps() → (items, counts, byte_totals); statuses below
+    scan.py          #   ScanState, ScanRunner (background thread: scan both sides + compare)
     sync.py          #   build_plan(), Action, ProgressState, SyncRunner (background thread)
     history.py       #   SQLite sessions: init_db / start_session / finish_session / fetch_sessions
 scripts/authorize.py # optional host-side helper: generates secrets/token.json via browser
@@ -55,20 +56,21 @@ python tests/test_logic.py
 
 ## Environment Variables
 
-| Var | Default | Purpose |
-|---|---|---|
-| `SEAGATE_MOUNT` | — (required, compose only) | Host path of the Seagate drive, bind-mounted to `/data/seagate` |
-| `SEAGATE_PATH` | `/data/seagate` | In-container/local path the app scans |
-| `SECRETS_DIR` / `DATA_DIR` | `<repo>/secrets`, `<repo>/data` (dev) · `/app/secrets`, `/app/data` (Docker) | credentials/token · SQLite DB |
-| `APP_PASSWORD` | empty (warns) | Login gate for the UI |
-| `DRIVE_ROOT_FOLDER` | `root` | Drive folder to sync against (`root` = entire My Drive, or e.g. `Backup/Seagate`) |
-| `TZ` | — | e.g. `Asia/Ho_Chi_Minh` |
+| Var                            | Default                                                                               | Purpose                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `SEAGATE_MOUNT`              | — (required, compose only)                                                           | Host path of the Seagate drive, bind-mounted to`/data/seagate`                      |
+| `SEAGATE_PATH`               | `/data/seagate`                                                                     | In-container/local path the app scans                                                 |
+| `SECRETS_DIR` / `DATA_DIR` | `<repo>/secrets`, `<repo>/data` (dev) · `/app/secrets`, `/app/data` (Docker) | credentials/token · SQLite DB                                                        |
+| `APP_PASSWORD`               | empty (warns)                                                                         | Login gate for the UI                                                                 |
+| `DRIVE_ROOT_FOLDER`          | `root`                                                                              | Drive folder to sync against (`root` = entire My Drive, or e.g. `Backup/Seagate`) |
+| `TZ`                         | —                                                                                    | e.g.`Asia/Ho_Chi_Minh`                                                              |
 
 ## Architecture & Data Flow
 
-1. **Auth** (`gdrive.py`): Desktop-app OAuth with paste-the-redirect-URL loopback flow (`redirect_uri=http://localhost:8090/`). `create_auth_flow()` → user authorizes → pastes the error-page URL → `finish_auth_flow()` → token saved to `secrets/token.json` (chmod 600, auto-refresh on load). The `Flow` object must persist in `st.session_state` between reruns (state check).
+1. **Auth** (`gdrive.py`): Web-application OAuth. `build_web_auth_url()` → user authorizes on Google → Google redirects back to the app with `?code=` (`OAUTH_REDIRECT_URI`, default `http://localhost:8501/`) → `main._handle_oauth_callback()` → `exchange_code()` → token saved to `secrets/token.json` (chmod 600, auto-refresh on load). No `Flow` object needs to survive the rerun; the page reload wipes `st.session_state`.
 2. **Scan**: `scanner.scan_local()` (os.walk, exclude patterns, regular files only) and `DriveClient.list_tree()` (BFS, pageSize 1000, skips shortcuts, warns on duplicate names, returns file map + folder-id map keyed by POSIX relpath).
 3. **Compare** (`compare.py`): statuses `IDENTICAL / DIFFERENT / LOCAL_ONLY / REMOTE_ONLY / GOOGLE_NATIVE` (Vietnamese labels in `STATUS_VI`). Two passes: cheap size check first, then MD5 only for opted-in size-match candidates. mtime tolerance: 2s.
+   Steps 2–3 run inside `ScanRunner` (`scan.py`), a `threading.Thread` mirroring `SyncRunner`: own `DriveClient`, thread-safe `ScanState` (phase `local → drive → compare`, counters, MD5 %, cancel `Event`). Scanning **must not** run inline in the Streamlit script — that blocks the run and no button, including Stop, can be clicked. `scan_local` / `list_tree` / `compare_maps` all take `cancel` and raise `SyncCancelled`; a cancelled scan yields **no** partial result (partial MD5 results would mislabel unhashed same-size files as identical).
 4. **Plan** (`sync.build_plan()`): directions `DIR_UP / DIR_DOWN / DIR_BOTH`, conflict policies `CONFLICT_NEWER / CONFLICT_FORCE / CONFLICT_SKIP`, ops `OP_UPLOAD / OP_UPDATE_REMOTE / OP_DOWNLOAD / OP_UPDATE_LOCAL / OP_TRASH_REMOTE / OP_DELETE_LOCAL` (labels in `OP_VI`). Transfers ordered by relpath; deletions (mirror mode, one-way only) always last.
 5. **Execute** (`SyncRunner`, a `threading.Thread`): creates its **own** `DriveClient` (httplib2 is not thread-safe), reports via `ProgressState` (thread-safe: lock, cancel `Event`, rolling 8s speed, ETA, log deque), writes a `history` session. UI polls `progress.snapshot()` + `time.sleep(0.7)` + `st.rerun()`; the Cancel button sets the cancel event.
 
@@ -94,6 +96,4 @@ python tests/test_logic.py
 
 ## Current Status
 
-**Implemented:** `app/config.py`, `app/utils.py`, `app/security.py`, all of `app/services/` (common, scanner, gdrive, compare, history, sync).
-
-**Not yet written:** `app/main.py` (Streamlit UI), `scripts/authorize.py`, `tests/test_logic.py`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `requirements.txt`, `.gitignore`, `.dockerignore`, `README.md`. When creating them, follow the contracts and guardrails above; pin dependencies (streamlit==1.41.1, google-api-python-client==2.156.0, google-auth==2.37.0, google-auth-oauthlib==1.2.1, google-auth-httplib2==0.2.0, pandas==2.2.3).
+Everything in the layout above is written and the app runs under Docker Compose. Dependencies are pinned in `requirements.txt` (streamlit==1.41.1, google-api-python-client==2.156.0, google-auth==2.37.0, google-auth-oauthlib==1.2.1, google-auth-httplib2==0.2.0, pandas==2.2.3) — keep them pinned.
