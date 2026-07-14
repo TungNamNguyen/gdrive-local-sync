@@ -79,6 +79,21 @@ class Action:
     remote: Optional[RemoteFile]
 
 
+def _safe_join(root: Path, relpath: str) -> Path:
+    """Ghep relpath vao root, DAM BAO ket qua khong thoat ra ngoai root.
+
+    Phong thu theo chieu sau: du ten file da duoc trung hoa o tang scan/Drive,
+    van kiem tra lai truoc khi ghi de/ tao file cuc bo.
+    """
+    dest = root.joinpath(*PurePosixPath(relpath).parts)
+    root_resolved = root.resolve()
+    try:
+        dest.resolve().relative_to(root_resolved)
+    except ValueError as exc:
+        raise ValueError(f"Đường dẫn thoát khỏi thư mục gốc: {relpath}") from exc
+    return dest
+
+
 def build_plan(
     items: list[ComparisonItem],
     direction: str,
@@ -360,7 +375,7 @@ class SyncRunner(threading.Thread):
 
         elif action.op in (OP_DOWNLOAD, OP_UPDATE_LOCAL):
             assert action.remote is not None
-            dest = self.seagate_root.joinpath(*PurePosixPath(action.relpath).parts)
+            dest = _safe_join(self.seagate_root, action.relpath)
             client.download_file(
                 file_id=action.remote.id,
                 dest=dest,
