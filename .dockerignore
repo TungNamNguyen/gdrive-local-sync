@@ -1,0 +1,30 @@
+# Keep the build context small and never bake secrets/data into the image.
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+
+secrets/
+data/
+
+# Python noise
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+ENV/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs not needed at runtime
+README.md
