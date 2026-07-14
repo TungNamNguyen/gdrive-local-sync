@@ -83,6 +83,19 @@ def _escape_q(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _safe_name(name: str) -> str:
+    """Trung hoa ten Drive de dung an toan lam MOT thanh phan duong dan cuc bo.
+
+    Drive cho phep ten tuy y (ke ca "/", "\\", ".", ".."). Neu giu nguyen,
+    mot file ten ".." co the khien duong dan tai xuong thoat ra ngoai thu muc
+    goc (path traversal). Ta thay separator bang "_" va vo hieu hoa "."/"..".
+    """
+    name = name.replace("/", "_").replace("\\", "_").replace("\x00", "_")
+    if name in (".", ".."):
+        name = name.replace(".", "_")  # "." -> "_", ".." -> "__"
+    return name
+
+
 # --------------------------------------------------------------------------- #
 # OAuth
 # --------------------------------------------------------------------------- #
@@ -139,6 +152,41 @@ def finish_auth_flow(flow: Flow, pasted: str) -> Credentials:
         flow.fetch_token(authorization_response=pasted)
     else:
         flow.fetch_token(code=pasted)
+    creds = flow.credentials
+    save_credentials(creds)
+    return creds
+
+
+# --------------------------------------------------------------------------- #
+# OAuth kieu web ("Dang nhap voi Google" ngay trong app)
+# --------------------------------------------------------------------------- #
+# App dung chinh URL cua no lam redirect. Sau khi cho phep, trinh duyet quay ve
+# app kem ?code=... App tu doi lay token. Vi trang RELOAD hoan toan khi redirect
+# (Streamlit mat session_state), ta KHONG dung PKCE va KHONG luu state: flow
+# duoc dung lai tu credentials.json va chi can `code` de doi token.
+def build_web_auth_url(redirect_uri: str) -> str:
+    """Tao URL trang dang nhap Google (redirect ve chinh app)."""
+    flow = Flow.from_client_secrets_file(
+        str(CREDENTIALS_FILE),
+        scopes=SCOPES,
+        redirect_uri=redirect_uri,
+        autogenerate_code_verifier=False,  # tat PKCE de doi token khong can flow cu
+    )
+    auth_url, _state = flow.authorization_url(
+        access_type="offline", prompt="consent", include_granted_scopes="true"
+    )
+    return auth_url
+
+
+def exchange_code(code: str, redirect_uri: str) -> Credentials:
+    """Doi authorization code (lay tu query param) lay token va luu lai."""
+    flow = Flow.from_client_secrets_file(
+        str(CREDENTIALS_FILE),
+        scopes=SCOPES,
+        redirect_uri=redirect_uri,
+        autogenerate_code_verifier=False,
+    )
+    flow.fetch_token(code=code)
     creds = flow.credentials
     save_credentials(creds)
     return creds
@@ -248,8 +296,9 @@ class DriveClient:
                     .execute(num_retries=3)
                 )
                 for f in resp.get("files", []):
-                    # Ten tren Drive co the chua "/", khong hop le lam duong dan.
-                    name = f["name"].replace("/", "_")
+                    # Ten tren Drive co the chua ky tu khong hop le lam duong dan
+                    # cuc bo (vd "/", "..") — trung hoa truoc khi ghep relpath.
+                    name = _safe_name(f["name"])
                     rel = f"{rel_dir}/{name}" if rel_dir else name
                     mime = f.get("mimeType", "")
                     if mime == FOLDER_MIME:
