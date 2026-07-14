@@ -1,0 +1,10 @@
+# Cau hinh Streamlit cho ung dung tu-host (chay localhost qua Docker).
+
+[client]
+# Ẩn thanh công cụ góc phải: nút "Deploy" (đẩy lên Streamlit Cloud) + menu dev.
+# App này tự host nên không cần. Đổi thành "viewer" nếu vẫn muốn giữ menu ⋮
+# (Settings/đổi theme…) nhưng bỏ nút Deploy.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
