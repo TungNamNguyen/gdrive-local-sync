@@ -28,7 +28,7 @@ def require_login() -> None:
 
     if st.session_state.get("auth_ok"):
         with st.sidebar:
-            if st.button("🚪 Đăng xuất", width="stretch"):
+            if st.button("🚪 Đăng xuất (thoát app)", use_container_width=True):
                 st.session_state["auth_ok"] = False
                 st.rerun()
         return
