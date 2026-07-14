@@ -1,0 +1,39 @@
+# Hardened deployment. The UI is bound to 127.0.0.1 only — for remote access
+# put a reverse proxy (HTTPS + auth) in front rather than exposing 0.0.0.0.
+services:
+  sync:
+    build: .
+    image: gdrive-local-sync:latest
+    container_name: gdrive-local-sync
+    restart: unless-stopped
+
+    # Localhost-only binding (guardrail). Do not change to 0.0.0.0.
+    ports:
+      - "127.0.0.1:8501:8501"
+
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      DRIVE_ROOT_FOLDER: ${DRIVE_ROOT_FOLDER:-root}
+      TZ: ${TZ:-}
+      # In-container paths (match the mounts below).
+      SEAGATE_PATH: /data/seagate
+      SECRETS_DIR: /app/secrets
+      DATA_DIR: /app/data
+
+    volumes:
+      # The Seagate drive, mounted read-write (downloads + .sync_trash).
+      - ${SEAGATE_MOUNT:?SEAGATE_MOUNT chưa được đặt trong .env}:/data/seagate
+      # OAuth client + token (token.json is written/refreshed by the app).
+      - ./secrets:/app/secrets
+      # SQLite sync history.
+      - ./data:/app/data
+
+    # --- Hardening (guardrails) ---------------------------------------------
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
