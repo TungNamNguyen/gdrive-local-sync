@@ -14,6 +14,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from services.common import SyncCancelled
 from services.gdrive import RemoteFile
 from services.scanner import LocalFile, md5_of
 
@@ -63,6 +64,9 @@ def compare_maps(
 
     hash_cb(bytes_da_hash, tong_byte_can_hash, file_hien_tai) — chi goi khi
     use_md5=True va co file can kiem tra checksum.
+
+    Raises:
+        SyncCancelled: nguoi dung bam Dung trong luc dang hash MD5.
     """
     items: list[ComparisonItem] = []
     counts: Counter = Counter()
@@ -101,7 +105,9 @@ def compare_maps(
         hashed = 0
         for rel in md5_candidates:
             if cancel is not None and cancel.is_set():
-                break
+                # Partial results would silently mislabel unhashed same-size
+                # files as identical, so cancelling discards the whole compare.
+                raise SyncCancelled()
             lf, rf = local[rel], remote[rel]
 
             def _chunk(n: int) -> None:
@@ -123,7 +129,12 @@ def compare_maps(
     for rel in only_local:
         _add(ComparisonItem(rel, LOCAL_ONLY, local[rel], None, None))
     for rel in only_remote:
-        _add(ComparisonItem(rel, REMOTE_ONLY, None, remote[rel], None))
+        rf = remote[rel]
+        # Google-native files (Docs/Sheets/...) can never exist on the Seagate
+        # side, so they must always be skipped — never planned for download and
+        # never mirror-trashed. Mark them GOOGLE_NATIVE even when Drive-only.
+        status = GOOGLE_NATIVE if rf.is_google_native else REMOTE_ONLY
+        _add(ComparisonItem(rel, status, None, rf, None))
 
     items.sort(key=lambda it: it.relpath.casefold())
     return items, counts, byte_totals
