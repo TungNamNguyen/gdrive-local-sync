@@ -1,11 +1,9 @@
 """Lop bao Google Drive API v3.
 
 Bao gom:
-- Luong OAuth "dan URL": tao link dang nhap voi redirect ve
-  http://localhost:8090/ (loopback). Chay trong Docker khong co trinh duyet,
-  nen sau khi nguoi dung cho phep, trinh duyet cua HO se bao "khong ket noi
-  duoc localhost:8090" — do la binh thuong; ho copy URL tren thanh dia chi
-  (chua ?code=...&state=...) va dan lai vao app de doi lay token.
+- OAuth kieu web: build_web_auth_url() tao link dang nhap redirect ve chinh
+  app (?code=...); exchange_code() doi code lay token. REDIRECT_URI (cong 8090)
+  chi phuc vu helper host-side scripts/authorize.py (mo trinh duyet, tu bat code).
 - Liet ke toan bo cay thu muc (BFS) -> {relpath -> RemoteFile}.
 - Upload resumable (giu nguyen mtime qua truong modifiedTime), download theo
   chunk ve file .syncpart roi rename atomic, chuyen file vao Thung rac Drive.
@@ -130,31 +128,6 @@ def load_saved_credentials() -> Optional[Credentials]:
         save_credentials(creds)
         return creds
     return None
-
-
-def create_auth_flow() -> tuple[Flow, str]:
-    """Tao (flow, auth_url). Flow phai duoc giu lai de goi finish_auth_flow."""
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_FILE), scopes=SCOPES, redirect_uri=REDIRECT_URI
-    )
-    auth_url, _state = flow.authorization_url(
-        access_type="offline", prompt="consent", include_granted_scopes="true"
-    )
-    return flow, auth_url
-
-
-def finish_auth_flow(flow: Flow, pasted: str) -> Credentials:
-    """Hoan tat dang nhap tu URL redirect (hoac ma code tho) nguoi dung dan vao."""
-    pasted = pasted.strip()
-    if not pasted:
-        raise ValueError("Bạn chưa dán URL/mã xác thực.")
-    if pasted.lower().startswith("http"):
-        flow.fetch_token(authorization_response=pasted)
-    else:
-        flow.fetch_token(code=pasted)
-    creds = flow.credentials
-    save_credentials(creds)
-    return creds
 
 
 # --------------------------------------------------------------------------- #
