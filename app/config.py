@@ -33,6 +33,11 @@ DRIVE_ROOT_DEFAULT = os.getenv("DRIVE_ROOT_FOLDER", "root").strip() or "root"
 # --- Bao mat -----------------------------------------------------------------
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
+# URL cua chinh ung dung, dung lam redirect OAuth (loopback kieu web). Sau khi
+# nguoi dung cho phep tren Google, trinh duyet quay ve day kem ?code=... va app
+# tu doi lay token. Doi neu chay sau reverse proxy (vd https://sync.example.com/).
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8501/")
+
 # --- Hieu nang ---------------------------------------------------------------
 UPLOAD_CHUNK = 8 * 1024 * 1024    # 8 MiB / lan gui (resumable upload)
 DOWNLOAD_CHUNK = 8 * 1024 * 1024
