@@ -5,9 +5,9 @@ Run from the repo root:
 
     python tests/test_logic.py
 
-Covers utils formatting, the local scanner (excludes + MD5), the comparison
-engine (all statuses, size vs MD5), and plan building (directions, conflict
-policies, mirror ordering).
+Covers utils formatting, the local scanner (excludes), the comparison engine
+(all statuses), plan building (directions, conflict policies, mirror
+ordering), the flat/incremental Drive listing, and the parallel sync runner.
 """
 from __future__ import annotations
 
@@ -29,8 +29,15 @@ from services.compare import (  # noqa: E402
     REMOTE_ONLY,
     compare_maps,
 )
-from services.gdrive import FOLDER_MIME, DriveClient, RemoteFile, _safe_name  # noqa: E402
-from services.scanner import LocalFile, md5_of, scan_local  # noqa: E402
+from services import drive_cache  # noqa: E402
+from services.gdrive import (  # noqa: E402
+    FOLDER_MIME,
+    DriveClient,
+    RemoteFile,
+    _safe_name,
+    build_tree,
+)
+from services.scanner import LocalFile, scan_local  # noqa: E402
 from services.sync import (  # noqa: E402
     CONFLICT_FORCE,
     CONFLICT_NEWER,
@@ -44,6 +51,9 @@ from services.sync import (  # noqa: E402
     OP_UPDATE_LOCAL,
     OP_UPDATE_REMOTE,
     OP_UPLOAD,
+    Action,
+    ProgressState,
+    SyncRunner,
     _safe_join,
     build_plan,
 )
@@ -62,10 +72,9 @@ def _remote(
     rel: str,
     size=10,
     mtime: float = 1000.0,
-    md5: str | None = "abc",
     mime: str = "application/octet-stream",
 ) -> RemoteFile:
-    return RemoteFile(id="id-" + rel, name=rel, relpath=rel, size=size, md5=md5, mtime=mtime, mime=mime)
+    return RemoteFile(id="id-" + rel, name=rel, relpath=rel, size=size, mtime=mtime, mime=mime)
 
 
 def _item(rel, status, local=None, remote=None, newer=None) -> ComparisonItem:
@@ -125,16 +134,6 @@ def test_scan_local_excludes_and_paths():
         assert errors == []
 
 
-def test_md5_of_matches_hashlib():
-    import hashlib
-
-    with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "f.bin"
-        data = os.urandom(9000)
-        p.write_bytes(data)
-        assert md5_of(p) == hashlib.md5(data).hexdigest()
-
-
 # --------------------------------------------------------------------------- #
 # compare
 # --------------------------------------------------------------------------- #
@@ -151,9 +150,9 @@ def test_compare_size_match_statuses():
         "same.txt": _remote("same.txt", size=10),
         "diff.txt": _remote("diff.txt", size=20, mtime=1000.0),
         "onlyR.txt": _remote("onlyR.txt", size=7),
-        "doc": _remote("doc", size=None, md5=None, mime="application/vnd.google-apps.document"),
+        "doc": _remote("doc", size=None, mime="application/vnd.google-apps.document"),
     }
-    items, counts, byte_totals = compare_maps(local, remote, use_md5=False)
+    items, counts, byte_totals = compare_maps(local, remote)
     by_rel = {it.relpath: it for it in items}
 
     assert by_rel["same.txt"].status == IDENTICAL
@@ -172,10 +171,10 @@ def test_compare_remote_only_native_is_skipped():
     # dangerous mirror-trash).
     local = {}
     remote = {
-        "doc": _remote("doc", size=None, md5=None, mime="application/vnd.google-apps.document"),
+        "doc": _remote("doc", size=None, mime="application/vnd.google-apps.document"),
         "file.bin": _remote("file.bin", size=10),
     }
-    items, _counts, _bytes = compare_maps(local, remote, use_md5=False)
+    items, _counts, _bytes = compare_maps(local, remote)
     by_rel = {it.relpath: it.status for it in items}
     assert by_rel["doc"] == GOOGLE_NATIVE
     assert by_rel["file.bin"] == REMOTE_ONLY
@@ -216,12 +215,29 @@ class _FakeFiles:
         return _FakeExec(page)
 
 
+class _FakeChanges:
+    """changes.list gia: tra het thay doi trong 1 trang + newStartPageToken."""
+
+    def __init__(self, changes, new_token):
+        self._changes = changes
+        self._new_token = new_token
+
+    def list(self, pageToken, pageSize, fields):  # noqa: N803
+        return _FakeExec(
+            {"changes": self._changes, "newStartPageToken": self._new_token}
+        )
+
+
 class _FakeService:
-    def __init__(self, pages, root_id):
+    def __init__(self, pages, root_id, changes=None, new_token="tok2"):
         self._files = _FakeFiles(pages, root_id)
+        self._changes = _FakeChanges(changes or [], new_token)
 
     def files(self):
         return self._files
+
+    def changes(self):
+        return self._changes
 
 
 def test_list_tree_flat_reconstruction():
@@ -231,15 +247,14 @@ def test_list_tree_flat_reconstruction():
                 {"id": "R", "name": "My Drive", "mimeType": FOLDER_MIME, "parents": []},
                 {"id": "A", "name": "Photos", "mimeType": FOLDER_MIME, "parents": ["R"]},
                 {"id": "f1", "name": "a.txt", "mimeType": "text/plain", "size": "10",
-                 "md5Checksum": "x", "modifiedTime": "2024-01-01T00:00:00.000Z",
-                 "parents": ["A"]},
+                 "modifiedTime": "2024-01-01T00:00:00.000Z", "parents": ["A"]},
             ]
         },
         {
             "files": [
                 {"id": "f2", "name": "b.bin", "mimeType": "application/octet-stream",
-                 "size": "20", "md5Checksum": "y",
-                 "modifiedTime": "2024-01-01T00:00:00.000Z", "parents": ["R"]},
+                 "size": "20", "modifiedTime": "2024-01-01T00:00:00.000Z",
+                 "parents": ["R"]},
                 # Muc ngoai cay root (parents lung tung) -> phai bi bo qua.
                 {"id": "f3", "name": "orphan.bin", "mimeType": "application/octet-stream",
                  "size": "5", "parents": ["ZZZ"]},
@@ -253,8 +268,45 @@ def test_list_tree_flat_reconstruction():
 
     assert set(files.keys()) == {"Photos/a.txt", "b.bin"}, files.keys()
     assert folders[""] == "R" and folders["Photos"] == "A"
-    assert files["Photos/a.txt"].size == 10 and files["b.bin"].md5 == "y"
+    assert files["Photos/a.txt"].size == 10 and files["b.bin"].size == 20
     assert "orphan.bin" not in {f.name for f in files.values()}
+
+
+def test_fetch_changes_and_apply():
+    # items hien co trong cache: mot file se bi sua, mot file se bi xoa.
+    items = {
+        "f1": {"id": "f1", "name": "a.txt", "mimeType": "text/plain",
+               "size": "10", "parents": ["R"]},
+        "f2": {"id": "f2", "name": "b.bin", "mimeType": "application/octet-stream",
+               "size": "20", "parents": ["R"]},
+    }
+    changes = [
+        # f1 doi ten + doi size
+        {"fileId": "f1", "file": {"id": "f1", "name": "a2.txt", "mimeType": "text/plain",
+                                  "size": "99", "parents": ["R"], "trashed": False}},
+        # f2 bi chuyen vao thung rac -> coi nhu xoa
+        {"fileId": "f2", "file": {"id": "f2", "name": "b.bin", "trashed": True}},
+        # f4 xoa han
+        {"fileId": "f4", "removed": True},
+        # f5 la file moi
+        {"fileId": "f5", "file": {"id": "f5", "name": "new.bin",
+                                  "mimeType": "application/octet-stream",
+                                  "size": "7", "parents": ["R"], "trashed": False}},
+    ]
+    client = DriveClient.__new__(DriveClient)
+    client.service = _FakeService([], root_id="R", changes=changes, new_token="tokNEW")
+
+    upserts, removed, new_token = client.fetch_changes("tokOLD")
+    assert new_token == "tokNEW"
+    assert set(upserts) == {"f1", "f5"} and removed == {"f2", "f4"}
+
+    drive_cache.apply_changes(items, upserts, removed)
+    assert set(items) == {"f1", "f5"}
+    assert items["f1"]["name"] == "a2.txt" and items["f1"]["size"] == "99"
+
+    # Dung cay tu items sau cap nhat: chi con a2.txt va new.bin duoi root.
+    files, _folders, _warn = build_tree(items, "R")
+    assert set(files.keys()) == {"a2.txt", "new.bin"}
 
 
 def test_safe_join_blocks_escape():
@@ -269,32 +321,6 @@ def test_safe_join_blocks_escape():
             pass
         else:
             raise AssertionError("expected ValueError for traversal path")
-
-
-def test_compare_md5_distinguishes_same_size():
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        good = root / "good.bin"
-        bad = root / "bad.bin"
-        content = b"A" * 100
-        good.write_bytes(content)
-        bad.write_bytes(b"B" * 100)  # same size, different content
-        import hashlib
-
-        real_md5 = hashlib.md5(content).hexdigest()
-
-        local = {
-            "good.bin": LocalFile("good.bin", good, 100, 1000.0),
-            "bad.bin": LocalFile("bad.bin", bad, 100, 1000.0),
-        }
-        remote = {
-            "good.bin": _remote("good.bin", size=100, md5=real_md5),
-            "bad.bin": _remote("bad.bin", size=100, md5=real_md5),
-        }
-        items, _counts, _bytes = compare_maps(local, remote, use_md5=True)
-        by_rel = {it.relpath: it.status for it in items}
-        assert by_rel["good.bin"] == IDENTICAL
-        assert by_rel["bad.bin"] == DIFFERENT
 
 
 # --------------------------------------------------------------------------- #
@@ -401,29 +427,84 @@ def test_scan_local_cancel_raises():
             raise AssertionError("scan_local phai raise SyncCancelled khi bi huy")
 
 
-def test_compare_md5_cancel_raises():
-    import hashlib
+def test_compare_cancel_raises():
     import threading
 
     from services.common import SyncCancelled
 
+    local = {"f.bin": _local("f.bin", size=10)}
+    remote = {"f.bin": _remote("f.bin", size=10)}
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        compare_maps(local, remote, cancel=cancel)
+    except SyncCancelled:
+        pass
+    else:
+        raise AssertionError("compare_maps phai raise SyncCancelled khi bi huy")
+
+
+# --------------------------------------------------------------------------- #
+# dong bo song song
+# --------------------------------------------------------------------------- #
+def test_progress_state_tracks_parallel_files():
+    p = ProgressState(total_files=2, total_bytes=30, direction=DIR_UP, mode="newer")
+    a1 = Action(OP_UPLOAD, "a.bin", 10, _local("a.bin", size=10), None)
+    a2 = Action(OP_UPLOAD, "b.bin", 20, _local("b.bin", size=20), None)
+
+    p.begin_file(a1)
+    p.begin_file(a2)
+    p.set_current_bytes("a.bin", 5)
+    p.set_current_bytes("b.bin", 100)  # vuot size -> phai bi kep ve 20
+
+    snap = p.snapshot()
+    assert snap["done_bytes"] == 25, snap["done_bytes"]
+    assert dict(snap["active"])["a.bin"] == 0.5
+
+    p.finish_file("a.bin", ok=True)
+    p.finish_file("b.bin", ok=False, error="b.bin: loi mang")
+    snap = p.snapshot()
+    assert snap["done_files"] == 1 and snap["failed_files"] == 1
+    assert snap["done_bytes"] == 30 and snap["active"] == []
+
+
+def test_sync_runner_parallel_local_deletes():
+    """Chay SyncRunner that voi 3 worker — toan thao tac xoa cuc bo (khong can
+    Drive): moi file phai duoc don vao .sync_trash va tien do phai khop."""
     with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "f.bin"
-        data = b"x" * 100
-        p.write_bytes(data)
-        digest = hashlib.md5(data).hexdigest()
+        root = Path(td)
+        actions = []
+        for i in range(9):
+            f = root / f"f{i}.bin"
+            f.write_bytes(b"x")
+            actions.append(
+                Action(OP_DELETE_LOCAL, f.name, 0,
+                       LocalFile(f.name, f, 1, 1000.0), None)
+            )
 
-        local = {"f.bin": LocalFile("f.bin", p, len(data), 1000.0)}
-        remote = {"f.bin": _remote("f.bin", size=len(data), md5=digest)}
+        progress = ProgressState(len(actions), 0, DIR_DOWN, "newer+mirror")
+        runner = SyncRunner(
+            creds=None,
+            seagate_root=root,
+            drive_root_path="root",
+            actions=actions,
+            remote_folders={"": "root"},  # co san -> khong goi resolve tren Drive
+            progress=progress,
+            workers=3,
+            client_factory=lambda: object(),  # delete_local khong dung client
+        )
+        runner.start()
+        runner.join(timeout=30)
 
-        cancel = threading.Event()
-        cancel.set()
-        try:
-            compare_maps(local, remote, use_md5=True, cancel=cancel)
-        except SyncCancelled:
-            pass
-        else:
-            raise AssertionError("compare_maps phai raise SyncCancelled khi bi huy")
+        snap = progress.snapshot()
+        assert not runner.is_alive()
+        assert snap["finished"] and snap["fatal"] is None
+        assert snap["done_files"] == 9 and snap["failed_files"] == 0
+        # Khong con file goc; tat ca nam trong .sync_trash/<timestamp>/
+        assert not any(fp.name.endswith(".bin") for fp in root.iterdir() if fp.is_file())
+        trash = root / config.LOCAL_TRASH_DIRNAME
+        moved = list(trash.rglob("*.bin"))
+        assert len(moved) == 9, moved
 
 
 # --------------------------------------------------------------------------- #
