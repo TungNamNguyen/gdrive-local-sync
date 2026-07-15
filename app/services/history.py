@@ -1,7 +1,8 @@
-"""Lich su dong bo (SQLite).
+"""Sync history (SQLite).
 
-Moi ham mo connection rieng (an toan khi goi tu thread dong bo lan thread
-giao dien). WAL mode de doc/ghi dong thoi khong khoa nhau.
+Every function opens its own connection (safe to call from both the sync
+thread and the UI thread). WAL mode allows concurrent reads/writes without
+blocking each other.
 """
 from __future__ import annotations
 
