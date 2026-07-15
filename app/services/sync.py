@@ -17,11 +17,12 @@ import shutil
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Callable, Optional
 
-from config import LOCAL_TRASH_DIRNAME
+from config import LOCAL_TRASH_DIRNAME, SYNC_WORKERS
 from services import history
 from services.common import SyncCancelled
 from services.compare import (
@@ -157,7 +158,11 @@ def build_plan(
 
 
 class ProgressState:
-    """Trang thai tien do dung chung giua thread dong bo va giao dien."""
+    """Trang thai tien do dung chung giua cac worker dong bo va giao dien.
+
+    Nhieu file co the dang truyen CUNG LUC (SyncRunner chay song song), nen
+    tien do tung file theo o `_active` {relpath -> [size, da_truyen]}.
+    """
 
     def __init__(self, total_files: int, total_bytes: int, direction: str, mode: str):
         self._lock = threading.Lock()
@@ -167,11 +172,9 @@ class ProgressState:
         self.direction = direction
         self.mode = mode
         self._base_bytes = 0        # byte cua cac file DA xong
-        self._current_bytes = 0     # byte da truyen cua file dang xu ly
+        self._active: dict[str, list[int]] = {}  # relpath -> [size, transferred]
         self.done_files = 0
         self.failed_files = 0
-        self.current = ""
-        self.current_size = 0
         self.errors: list[str] = []
         self._log: deque[str] = deque(maxlen=500)
         self._samples: deque[tuple[float, int]] = deque(maxlen=60)
@@ -180,33 +183,37 @@ class ProgressState:
         self.fatal_error: Optional[str] = None
         self.session_id: Optional[int] = None
 
-    # ---- ghi (goi tu thread dong bo) ----
+    def _inflight_bytes(self) -> int:
+        return sum(t for _s, t in self._active.values())
+
+    # ---- ghi (goi tu cac worker dong bo) ----
     def log(self, message: str) -> None:
         with self._lock:
             self._log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
 
     def begin_file(self, action: Action) -> None:
         with self._lock:
-            self.current = action.relpath
-            self.current_size = action.size
-            self._current_bytes = 0
+            self._active[action.relpath] = [action.size, 0]
             self._log.append(
                 f"[{time.strftime('%H:%M:%S')}] {OP_VI[action.op]} — {action.relpath}"
                 + (f" ({human_size(action.size)})" if action.size else "")
             )
 
-    def set_current_bytes(self, transferred: int) -> None:
+    def set_current_bytes(self, relpath: str, transferred: int) -> None:
         with self._lock:
-            if self.current_size:
-                transferred = min(transferred, self.current_size)
-            self._current_bytes = transferred
-            self._samples.append((time.time(), self._base_bytes + self._current_bytes))
+            entry = self._active.get(relpath)
+            if entry is None:
+                return
+            if entry[0]:
+                transferred = min(transferred, entry[0])
+            entry[1] = transferred
+            self._samples.append((time.time(), self._base_bytes + self._inflight_bytes()))
 
-    def finish_file(self, ok: bool, error: Optional[str] = None) -> None:
+    def finish_file(self, relpath: str, ok: bool, error: Optional[str] = None) -> None:
         with self._lock:
-            self._base_bytes += self.current_size
-            self._current_bytes = 0
-            self._samples.append((time.time(), self._base_bytes))
+            size, _t = self._active.pop(relpath, (0, 0))
+            self._base_bytes += size
+            self._samples.append((time.time(), self._base_bytes + self._inflight_bytes()))
             if ok:
                 self.done_files += 1
             else:
@@ -215,8 +222,6 @@ class ProgressState:
                     if len(self.errors) < 200:
                         self.errors.append(error)
                     self._log.append(f"[{time.strftime('%H:%M:%S')}] ❌ {error}")
-            self.current = ""
-            self.current_size = 0
 
     def fatal(self, message: str) -> None:
         with self._lock:
@@ -231,7 +236,7 @@ class ProgressState:
     # ---- doc (goi tu giao dien) ----
     def snapshot(self) -> dict:
         with self._lock:
-            done_bytes = self._base_bytes + self._current_bytes
+            done_bytes = self._base_bytes + self._inflight_bytes()
             speed = 0.0
             now = time.time()
             recent = [(t, b) for (t, b) in self._samples if now - t <= 8.0]
@@ -239,17 +244,17 @@ class ProgressState:
                 speed = (recent[-1][1] - recent[0][1]) / (recent[-1][0] - recent[0][0])
             remaining = max(self.total_bytes - done_bytes, 0)
             eta = remaining / speed if speed > 0 else None
-            current_frac = (
-                self._current_bytes / self.current_size if self.current_size else None
-            )
+            active = [
+                (rel, (t / s) if s else None)
+                for rel, (s, t) in sorted(self._active.items())
+            ]
             return {
                 "total_files": self.total_files,
                 "total_bytes": self.total_bytes,
                 "done_files": self.done_files,
                 "failed_files": self.failed_files,
                 "done_bytes": done_bytes,
-                "current": self.current,
-                "current_frac": current_frac,
+                "active": active,
                 "speed": speed,
                 "eta": eta,
                 "elapsed": now - self.started_at,
@@ -262,7 +267,14 @@ class ProgressState:
 
 
 class SyncRunner(threading.Thread):
-    """Thread thuc thi ke hoach dong bo. Giao dien poll qua `progress`."""
+    """Thread dieu phoi ke hoach dong bo. Giao dien poll qua `progress`.
+
+    Cac thao tac TRUYEN TAI chay song song `workers` file mot luc (nhanh ro
+    ret voi nhieu file nho — thoi gian chu yeu la cho do tre tung luot goi).
+    Cac thao tac XOA (mirror) chi chay SAU khi moi truyen tai xong (giu dung
+    thu tu an toan cua build_plan). Moi worker co DriveClient rieng (httplib2
+    khong thread-safe).
+    """
 
     def __init__(
         self,
@@ -272,6 +284,8 @@ class SyncRunner(threading.Thread):
         actions: list[Action],
         remote_folders: Optional[dict[str, str]],
         progress: ProgressState,
+        workers: Optional[int] = None,
+        client_factory: Optional[Callable[[], DriveClient]] = None,
     ):
         super().__init__(daemon=True, name="sync-runner")
         self.creds = creds
@@ -280,16 +294,23 @@ class SyncRunner(threading.Thread):
         self.actions = actions
         self.remote_folders = dict(remote_folders or {})
         self.progress = progress
+        self.workers = max(1, workers if workers is not None else SYNC_WORKERS)
+        self._make_client = client_factory or (lambda: DriveClient(self.creds))
+        # ensure_folder_path doc/ghi cache `folders` dung chung va co the TAO
+        # thu muc — phai tuan tu hoa, khong thi hai worker tao trung thu muc
+        # (Drive cho phep trung ten -> cay bi nhan doi).
+        self._folders_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
-    def run(self) -> None:  # noqa: C901 — luong dieu phoi tuyen tinh, de doc
+    def run(self) -> None:
         p = self.progress
         session_id: Optional[int] = None
         status = "error"
         try:
             p.log(f"Bắt đầu — hướng: {DIRECTION_VI.get(p.direction, p.direction)}, "
-                  f"{p.total_files:,} thao tác, {human_size(p.total_bytes)}.")
-            client = DriveClient(self.creds)  # client rieng cho thread nay
+                  f"{p.total_files:,} thao tác, {human_size(p.total_bytes)}, "
+                  f"{self.workers} luồng song song.")
+            client = self._make_client()  # client cua thread dieu phoi
 
             needs_remote_write = any(
                 a.op in (OP_UPLOAD, OP_UPDATE_REMOTE) for a in self.actions
@@ -308,20 +329,13 @@ class SyncRunner(threading.Thread):
             p.session_id = session_id
 
             trash_stamp = time.strftime("%Y%m%d-%H%M%S")
-            for action in self.actions:
-                if p.cancel.is_set():
-                    p.log("⛔ Đã hủy theo yêu cầu người dùng.")
-                    break
-                p.begin_file(action)
-                try:
-                    self._execute(client, action, folders, trash_stamp)
-                    p.finish_file(ok=True)
-                except SyncCancelled:
-                    p.finish_file(ok=False, error=f"{action.relpath}: đã hủy giữa chừng")
-                    p.log("⛔ Đã hủy theo yêu cầu người dùng.")
-                    break
-                except Exception as exc:  # noqa: BLE001 — 1 file loi khong dung ca phien
-                    p.finish_file(ok=False, error=f"{action.relpath}: {exc}")
+            transfers = [a for a in self.actions if a.op in _TRANSFER_OPS]
+            deletions = [a for a in self.actions if a.op not in _TRANSFER_OPS]
+            self._run_batch(transfers, folders, trash_stamp)
+            if not p.cancel.is_set():
+                self._run_batch(deletions, folders, trash_stamp)
+            if p.cancel.is_set():
+                p.log("⛔ Đã hủy theo yêu cầu người dùng.")
 
             if p.cancel.is_set():
                 status = "cancelled"
@@ -349,6 +363,44 @@ class SyncRunner(threading.Thread):
             p.mark_finished()
 
     # ------------------------------------------------------------------ #
+    def _run_batch(
+        self,
+        actions: list[Action],
+        folders: dict[str, str],
+        trash_stamp: str,
+    ) -> None:
+        """Chay mot dot thao tac song song; ket thuc khi MOI thao tac xong.
+
+        Worker kiem tra cancel truoc moi thao tac: bam Huy thi cac thao tac
+        chua bat dau duoc bo qua, thao tac dang truyen tu dung qua cancel Event.
+        """
+        if not actions:
+            return
+        p = self.progress
+        tls = threading.local()  # moi worker thread mot DriveClient rieng
+
+        def _worker(action: Action) -> None:
+            if p.cancel.is_set():
+                return
+            client = getattr(tls, "client", None)
+            if client is None:
+                client = tls.client = self._make_client()
+            p.begin_file(action)
+            try:
+                self._execute(client, action, folders, trash_stamp)
+                p.finish_file(action.relpath, ok=True)
+            except SyncCancelled:
+                p.finish_file(action.relpath, ok=False,
+                              error=f"{action.relpath}: đã hủy giữa chừng")
+            except Exception as exc:  # noqa: BLE001 — 1 file loi khong dung ca phien
+                p.finish_file(action.relpath, ok=False, error=f"{action.relpath}: {exc}")
+
+        with ThreadPoolExecutor(
+            max_workers=self.workers, thread_name_prefix="sync-worker"
+        ) as pool:
+            list(pool.map(_worker, actions))
+
+    # ------------------------------------------------------------------ #
     def _execute(
         self,
         client: DriveClient,
@@ -358,18 +410,22 @@ class SyncRunner(threading.Thread):
     ) -> None:
         p = self.progress
 
+        def _on_bytes(n: int, rel: str = action.relpath) -> None:
+            p.set_current_bytes(rel, n)
+
         if action.op in (OP_UPLOAD, OP_UPDATE_REMOTE):
             assert action.local is not None
             parent_rel = str(PurePosixPath(action.relpath).parent)
             parent_rel = "" if parent_rel == "." else parent_rel
-            parent_id = client.ensure_folder_path(parent_rel, folders)
+            with self._folders_lock:
+                parent_id = client.ensure_folder_path(parent_rel, folders)
             client.upload_file(
                 local_path=action.local.path,
                 name=PurePosixPath(action.relpath).name,
                 parent_id=parent_id,
                 mtime=action.local.mtime,
                 existing_id=action.remote.id if action.remote else None,
-                progress_cb=p.set_current_bytes,
+                progress_cb=_on_bytes,
                 cancel=p.cancel,
             )
 
@@ -380,7 +436,7 @@ class SyncRunner(threading.Thread):
                 file_id=action.remote.id,
                 dest=dest,
                 mtime=action.remote.mtime,
-                progress_cb=p.set_current_bytes,
+                progress_cb=_on_bytes,
                 cancel=p.cancel,
             )
 
