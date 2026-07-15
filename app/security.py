@@ -1,9 +1,9 @@
-"""Cong dang nhap don gian bang mat khau (APP_PASSWORD).
+"""Simple password login gate (APP_PASSWORD).
 
-Streamlit khong co xac thuc tich hop, nen lop nay chan toan bo giao dien
-cho toi khi nguoi dung nhap dung mat khau. So sanh bang hmac.compare_digest
-de chong timing attack. Voi trien khai ra Internet, hay dat them reverse
-proxy (HTTPS + basic auth) phia truoc — xem README.
+Streamlit has no built-in authentication, so this layer blocks the whole UI
+until the user enters the correct password. Comparison uses
+hmac.compare_digest to resist timing attacks. For Internet-facing deployments
+put a reverse proxy (HTTPS + basic auth) in front — see README.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import config
 
 
 def require_login() -> None:
-    """Dung toan bo app (st.stop) neu chua dang nhap."""
+    """Stop the whole app (st.stop) until the user is logged in."""
     password = config.APP_PASSWORD
 
     if not password:
@@ -42,6 +42,6 @@ def require_login() -> None:
             st.session_state["auth_ok"] = True
             st.rerun()
         else:
-            time.sleep(1.0)  # lam cham brute-force
+            time.sleep(1.0)  # slow down brute-force attempts
             st.error("Sai mật khẩu.")
     st.stop()
