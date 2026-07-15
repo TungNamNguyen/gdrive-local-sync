@@ -43,7 +43,9 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps"
 REDIRECT_URI = "http://localhost:8090/"
-_LIST_FIELDS = "nextPageToken, files(id, name, mimeType, size, md5Checksum, modifiedTime)"
+_LIST_FIELDS = (
+    "nextPageToken, files(id, name, mimeType, size, md5Checksum, modifiedTime, parents)"
+)
 
 
 @dataclass(frozen=True)
@@ -240,67 +242,106 @@ class DriveClient:
         progress_cb: Optional[Callable[[int, int], None]] = None,
         cancel: Optional[threading.Event] = None,
     ) -> tuple[dict[str, RemoteFile], dict[str, str], list[str]]:
-        """BFS toan bo cay duoi root_id.
+        """Liet ke toan bo cay duoi root_id.
+
+        Thay vi duyet TUNG thu muc (moi thu muc = 1 luot goi API, rat cham khi
+        Drive co nhieu thu muc), ta quet PHANG: lay het muc chua bi xoa theo
+        trang 1000/luot roi dung lai cay trong bo nho tu truong `parents`. So
+        luot goi API giam tu "so thu muc" xuong con "tong so muc / 1000".
+
+        (Danh doi: neu root la mot thu muc con nho trong mot My Drive khong lo,
+        ta van tai ve toan bo danh sach roi loc — nhung do tre mang cua vai chuc
+        luot goi phang van thap hon hang nghin luot goi theo tung thu muc.)
 
         Returns:
             files:    {relpath -> RemoteFile}
             folders:  {relpath -> folder_id} (bao gom "" -> root_id)
             warnings: shortcut bi bo qua, ten trung lap...
         """
-        files: dict[str, RemoteFile] = {}
-        folders: dict[str, str] = {"": root_id}
-        warnings: list[str] = []
-        queue: list[tuple[str, str]] = [("", root_id)]
+        # "root" la bi danh: file ngay duoi My Drive co parents = [<id that>],
+        # khong phai chuoi "root". Phai doi ra id that de ghep cay.
+        real_root = root_id
+        if root_id == "root":
+            real_root = (
+                self.service.files().get(fileId="root", fields="id").execute(num_retries=3)["id"]
+            )
 
-        while queue:
+        # 1) Quet phang: gom moi muc chua bi xoa (id -> metadata).
+        raw: dict[str, dict] = {}
+        n_files = n_folders = 0
+        page_token: Optional[str] = None
+        while True:
             if cancel is not None and cancel.is_set():
                 raise SyncCancelled()
-            rel_dir, folder_id = queue.pop(0)
-            page_token: Optional[str] = None
-            while True:
-                resp = (
-                    self.service.files()
-                    .list(
-                        q=f"'{folder_id}' in parents and trashed = false",
-                        fields=_LIST_FIELDS,
-                        pageSize=1000,
-                        pageToken=page_token,
-                    )
-                    .execute(num_retries=3)
+            resp = (
+                self.service.files()
+                .list(
+                    q="trashed = false",
+                    fields=_LIST_FIELDS,
+                    pageSize=1000,
+                    pageToken=page_token,
                 )
-                for f in resp.get("files", []):
-                    # Ten tren Drive co the chua ky tu khong hop le lam duong dan
-                    # cuc bo (vd "/", "..") — trung hoa truoc khi ghep relpath.
-                    name = _safe_name(f["name"])
-                    rel = f"{rel_dir}/{name}" if rel_dir else name
-                    mime = f.get("mimeType", "")
-                    if mime == FOLDER_MIME:
-                        if rel in folders:
-                            warnings.append(f"Trùng tên thư mục trên Drive, chỉ dùng bản đầu: {rel}")
-                            continue
-                        folders[rel] = f["id"]
-                        queue.append((rel, f["id"]))
-                    elif mime == SHORTCUT_MIME:
-                        warnings.append(f"Bỏ qua shortcut: {rel}")
-                    else:
-                        if rel in files:
-                            warnings.append(f"Trùng tên file trên Drive, chỉ dùng bản đầu: {rel}")
-                            continue
-                        raw_size = f.get("size")
-                        files[rel] = RemoteFile(
-                            id=f["id"],
-                            name=f["name"],
-                            relpath=rel,
-                            size=int(raw_size) if raw_size is not None else None,
-                            md5=f.get("md5Checksum"),
-                            mtime=_rfc3339_to_ts(f.get("modifiedTime", "")),
-                            mime=mime,
-                        )
-                if progress_cb is not None:
-                    progress_cb(len(files), len(folders))
-                page_token = resp.get("nextPageToken")
-                if not page_token:
-                    break
+                .execute(num_retries=3)
+            )
+            for f in resp.get("files", []):
+                raw[f["id"]] = f
+                if f.get("mimeType") == FOLDER_MIME:
+                    n_folders += 1
+                else:
+                    n_files += 1
+            if progress_cb is not None:
+                progress_cb(n_files, n_folders)  # tho: gom ca ngoai root, du de thay tien do
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+        # 2) Chi muc con theo parent id.
+        children: dict[str, list[dict]] = {}
+        for f in raw.values():
+            for pid in f.get("parents", []):
+                children.setdefault(pid, []).append(f)
+
+        # 3) Dung cay tu root — hoan toan trong bo nho, khong goi API nua.
+        files: dict[str, RemoteFile] = {}
+        folders: dict[str, str] = {"": real_root}
+        warnings: list[str] = []
+        visited: set[str] = set()
+        queue: list[tuple[str, str]] = [("", real_root)]
+        while queue:
+            rel_dir, folder_id = queue.pop(0)
+            if folder_id in visited:  # phong ve vong lap (parents da hong)
+                continue
+            visited.add(folder_id)
+            for f in children.get(folder_id, []):
+                # Ten tren Drive co the chua ky tu khong hop le lam duong dan
+                # cuc bo (vd "/", "..") — trung hoa truoc khi ghep relpath.
+                name = _safe_name(f["name"])
+                rel = f"{rel_dir}/{name}" if rel_dir else name
+                mime = f.get("mimeType", "")
+                if mime == FOLDER_MIME:
+                    if rel in folders:
+                        warnings.append(f"Trùng tên thư mục trên Drive, chỉ dùng bản đầu: {rel}")
+                        continue
+                    folders[rel] = f["id"]
+                    queue.append((rel, f["id"]))
+                elif mime == SHORTCUT_MIME:
+                    warnings.append(f"Bỏ qua shortcut: {rel}")
+                else:
+                    if rel in files:
+                        warnings.append(f"Trùng tên file trên Drive, chỉ dùng bản đầu: {rel}")
+                        continue
+                    raw_size = f.get("size")
+                    files[rel] = RemoteFile(
+                        id=f["id"],
+                        name=f["name"],
+                        relpath=rel,
+                        size=int(raw_size) if raw_size is not None else None,
+                        md5=f.get("md5Checksum"),
+                        mtime=_rfc3339_to_ts(f.get("modifiedTime", "")),
+                        mime=mime,
+                    )
+        if progress_cb is not None:
+            progress_cb(len(files), len(folders))  # con so chinh xac sau khi loc theo root
         return files, folders, warnings
 
     # ---- Truyen tai ----
