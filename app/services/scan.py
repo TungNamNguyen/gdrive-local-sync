@@ -1,18 +1,18 @@
-"""Quet & so sanh chay o thread nen (de nguoi dung co the bam Dung).
+"""Scan & compare running on a background thread (so the user can press Stop).
 
-Cung mo hinh voi sync.SyncRunner: mot doi tuong trang thai thread-safe
-(`ScanState`) + mot thread (`ScanRunner`). Giao dien chi doc qua snapshot()
-va bam nut Dung -> set `cancel` Event.
+Same model as sync.SyncRunner: a thread-safe state object (`ScanState`) plus a
+thread (`ScanRunner`). The UI only reads via snapshot(); pressing Stop sets the
+`cancel` Event.
 
-Phia Drive quet TANG DAN khi co the: lan dau quet phang day du va luu
-{id -> metadata} + changes-token vao drive_cache; cac lan sau chi hoi
-changes.list (1-2 luot goi API) roi dung lai cay tu cache. Cache hong/het
-han/doi tai khoan -> tu quay ve quet day du.
+The Drive side scans INCREMENTALLY when possible: the first scan does a full
+flat sweep and saves {id -> metadata} + a changes-token to drive_cache; later
+scans only call changes.list (1-2 API calls) and rebuild the tree from the
+cache. A broken/expired cache or a different account falls back to a full scan.
 
-Vi sao phai chay o thread nen: neu quet ngay trong lan chay script cua
-Streamlit, script bi chan cho toi khi quet xong nen KHONG nut nao bam duoc.
+Why a background thread: if scanning ran inline in the Streamlit script run,
+the run would block until the scan finished and NO button could be clicked.
 
-KHONG duoc goi bat ky ham Streamlit nao trong file nay.
+NO Streamlit calls are allowed anywhere in this file.
 """
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ from services.compare import compare_maps
 from services.gdrive import DriveClient, build_tree
 from services.scanner import scan_local
 
-# Cac pha cua mot lan quet
-PHASE_LOCAL = "local"      # dang doc o Seagate
-PHASE_DRIVE = "drive"      # dang liet ke cay tren Drive
-PHASE_COMPARE = "compare"  # dang doi chieu
+# Phases of a scan
+PHASE_LOCAL = "local"      # reading the Seagate drive
+PHASE_DRIVE = "drive"      # listing the Drive tree
+PHASE_COMPARE = "compare"  # comparing
 
 PHASE_VI = {
     PHASE_LOCAL: "Đang quét ổ Seagate…",
@@ -38,13 +38,13 @@ PHASE_VI = {
     PHASE_COMPARE: "Đang so sánh…",
 }
 
-# Che do quet phia Drive
-DRIVE_FULL = "full"                # quet phang day du
-DRIVE_INCREMENTAL = "incremental"  # chi hoi thay doi tu lan truoc (changes.list)
+# Drive scan modes
+DRIVE_FULL = "full"                # full flat sweep
+DRIVE_INCREMENTAL = "incremental"  # only ask for changes since last scan (changes.list)
 
 
 class ScanState:
-    """Tien do quet/so sanh, dung chung giua thread quet va giao dien."""
+    """Scan/compare progress, shared between the scan thread and the UI."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -63,7 +63,7 @@ class ScanState:
         self._error: Optional[str] = None
         self._result: Optional[dict] = None
 
-    # ---- ghi (goi tu thread quet) ----
+    # ---- writes (called from the scan thread) ----
     def set_phase(self, phase: str) -> None:
         with self._lock:
             self._phase = phase
@@ -98,7 +98,7 @@ class ScanState:
         with self._lock:
             self._finished = True
 
-    # ---- doc (goi tu giao dien) ----
+    # ---- reads (called from the UI) ----
     def snapshot(self) -> dict:
         with self._lock:
             return {
@@ -118,7 +118,7 @@ class ScanState:
 
 
 class ScanRunner(threading.Thread):
-    """Thread quet hai phia roi so sanh. Giao dien poll qua `state`."""
+    """Thread that scans both sides and compares. The UI polls via `state`."""
 
     def __init__(
         self,
@@ -151,13 +151,13 @@ class ScanRunner(threading.Thread):
                 cancel=s.cancel,
             )
 
-            # 2) Google Drive — client rieng cho thread nay (httplib2 khong
-            # thread-safe), giong SyncRunner.
+            # 2) Google Drive — own client for this thread (httplib2 is not
+            # thread-safe), same as SyncRunner.
             s.set_phase(PHASE_DRIVE)
             client = DriveClient(self.creds)
             remote, folders, warnings = self._scan_drive(client)
 
-            # 3) So sanh.
+            # 3) Compare.
             s.set_phase(PHASE_COMPARE)
             items, counts, byte_totals = compare_maps(local, remote, cancel=s.cancel)
             s.set_result(
@@ -174,7 +174,7 @@ class ScanRunner(threading.Thread):
             )
         except SyncCancelled:
             s.mark_cancelled()
-        except Exception as exc:  # noqa: BLE001 — bao loi len UI thay vi crash
+        except Exception as exc:  # noqa: BLE001 — surface the error in the UI instead of crashing
             s.set_error(str(exc))
         finally:
             s.mark_finished()
@@ -183,7 +183,7 @@ class ScanRunner(threading.Thread):
     def _scan_drive(
         self, client: DriveClient
     ) -> tuple[dict, dict, list[str]]:
-        """Lay map phang (tang dan neu co cache) roi dung cay theo thu muc goc."""
+        """Get the flat map (incrementally when cached) and build the tree under the root."""
         s = self.state
 
         raw: Optional[dict[str, dict]] = None
@@ -196,7 +196,7 @@ class ScanRunner(threading.Thread):
                 upserts, removed, token = client.fetch_changes(old_token, cancel=s.cancel)
             except SyncCancelled:
                 raise
-            except Exception:  # noqa: BLE001 — token het han/hong -> quet day du
+            except Exception:  # noqa: BLE001 — token expired/broken -> full scan
                 raw = None
             else:
                 drive_cache.apply_changes(items, upserts, removed)
@@ -205,16 +205,17 @@ class ScanRunner(threading.Thread):
 
         if raw is None:
             s.set_drive_mode(DRIVE_FULL)
-            # Lay token TRUOC khi quet: thay doi xay ra trong luc quet se duoc
-            # phat lai o lan sau (upsert trung lap vo hai, con hon bo lot).
+            # Fetch the token BEFORE sweeping: changes that happen during the
+            # sweep get replayed next time (duplicate upserts are harmless,
+            # missing a change is not).
             token = client.get_start_page_token()
             raw = client.fetch_all_items(progress_cb=s.on_drive, cancel=s.cancel)
 
-        # Thu muc goc: "" / "root" -> id that; duong dan con -> tra cuu API.
+        # Root folder: "" / "root" -> real id; a subfolder path -> API lookup.
         try:
             root_id = client.resolve_folder_path(self.drive_root_path, create=False)
         except FileNotFoundError:
-            drive_cache.save(self.account, token, raw)  # cache van dung cho lan sau
+            drive_cache.save(self.account, token, raw)  # cache stays valid for next time
             return {}, {}, [
                 f"Thư mục '{self.drive_root_path}' chưa tồn tại trên Drive — "
                 "sẽ được tạo khi tải lên."
