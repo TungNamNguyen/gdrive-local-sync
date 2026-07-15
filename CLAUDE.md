@@ -36,7 +36,7 @@ scripts/authorize.py # optional host-side helper: generates secrets/token.json v
 tests/test_logic.py  # stdlib assert-based tests (no pytest dependency)
 secrets/             # credentials.json (user-provided) + token.json (generated) — gitignored
 data/                # sync_history.db — gitignored
-Dockerfile, docker-compose.yml, .env(.example), requirements.txt, README.md (Vietnamese)
+Dockerfile, docker-compose.yml, .env(.example), requirements.txt, README.md (English)
 ```
 
 ## Commands
@@ -84,7 +84,8 @@ python tests/test_logic.py
 - Container stays non-root (UID 1000), `read_only: true` rootfs + tmpfs `/tmp` + `HOME=/tmp`, `cap_drop: [ALL]`, `no-new-privileges`.
 - Keep `hmac.compare_digest` and the ~1s failure delay in `security.py`. Never log tokens or credential contents.
 - **No Streamlit imports/calls inside `app/services/` or inside `SyncRunner`** — services communicate only via callbacks and `ProgressState`.
-- User-facing strings are Vietnamese; identifiers/comments English.
+- User-facing strings are Vietnamese; identifiers/comments/docs (incl. README) English.
+- Emoji/icons are allowed ONLY in strings rendered by the Streamlit UI (labels, buttons, log lines shown in the app). No emoji anywhere else: comments, test output, script echoes/prints, docs.
 
 ## Key Behaviors & Gotchas
 
