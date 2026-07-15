@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Host-side helper to generate secrets/token.json via a real browser.
 
-The Streamlit app runs inside Docker with no browser, so it uses the
-"paste-the-redirect-URL" flow. On a normal desktop you can instead run this
-script once: it opens a browser, captures the OAuth code on a local server,
-and writes secrets/token.json (which the container then mounts read-only).
+The Streamlit app signs in through its own web redirect flow, but this script
+is a convenient alternative on a normal desktop: it opens a browser, captures
+the OAuth code on a local loopback server (port 8090), and writes
+secrets/token.json (which the container then mounts).
 
 Usage (from the repo root):
 
@@ -30,8 +30,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: E402
 def main() -> int:
     config.ensure_dirs()
     if not config.CREDENTIALS_FILE.exists():
-        print(f"❌ Không thấy {config.CREDENTIALS_FILE}.")
-        print("   Tải OAuth client (Desktop app) từ Google Cloud Console và đặt vào đó.")
+        print(f"Khong thay {config.CREDENTIALS_FILE}.")
+        print("Tai OAuth client (Desktop app) tu Google Cloud Console va dat vao do.")
         return 1
 
     flow = InstalledAppFlow.from_client_secrets_file(
@@ -41,7 +41,7 @@ def main() -> int:
     # capture the authorization code automatically.
     creds = flow.run_local_server(port=8090, prompt="consent", open_browser=True)
     save_credentials(creds)
-    print(f"✅ Đã lưu token vào {config.TOKEN_FILE}")
+    print(f"Da luu token vao {config.TOKEN_FILE}")
     return 0
 
 
