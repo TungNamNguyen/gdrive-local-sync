@@ -1,12 +1,13 @@
-"""Cache danh sach Drive giua cac lan quet (phuc vu quet tang dan).
+"""Cache of the Drive listing between scans (enables incremental scanning).
 
-Luu map phang {id -> metadata} + changes-token cua lan quet truoc vao mot
-file JSON trong DATA_DIR. Lan quet sau chi hoi Drive "co gi thay doi tu
-token nay?" (changes.list) roi va cap nhat map — thay vi tai lai toan bo.
+Stores the flat map {id -> metadata} plus the changes-token of the previous
+scan in a JSON file under DATA_DIR. The next scan only asks Drive "what
+changed since this token?" (changes.list) and patches the map — instead of
+re-downloading the whole listing.
 
-Cache gan voi TAI KHOAN (email): doi tai khoan la cache vo nghia -> quet
-day du lai. Thu muc goc thi KHONG anh huong: map phang chua ca My Drive,
-cay duoc dung lai tu goc bat ky (build_tree).
+The cache is tied to the ACCOUNT (email): a different account makes the cache
+meaningless -> full rescan. The root folder does NOT matter: the flat map
+covers the whole My Drive and the tree is rebuilt from any root (build_tree).
 """
 from __future__ import annotations
 
@@ -18,10 +19,10 @@ from config import DATA_DIR
 
 CACHE_FILE = DATA_DIR / "drive_cache.json"
 
-# Chi giu cac truong build_tree can — khop _ITEM_FIELDS ben gdrive.py.
+# Keep only the fields build_tree needs — must match _ITEM_FIELDS in gdrive.py.
 _KEEP_FIELDS = ("id", "name", "mimeType", "size", "modifiedTime", "parents")
 
-# Doi cau truc cache thi tang so nay de vo hieu hoa cache cu.
+# Bump this number whenever the cache structure changes to invalidate old caches.
 _VERSION = 1
 
 
@@ -30,7 +31,7 @@ def _slim(item: dict) -> dict:
 
 
 def load(account: str) -> Optional[tuple[dict[str, dict], str]]:
-    """Tra ve (items, token) neu co cache hop le cua dung tai khoan, khong thi None."""
+    """Return (items, token) if a valid cache exists for this account, else None."""
     if not account or not CACHE_FILE.exists():
         return None
     try:
@@ -47,7 +48,7 @@ def load(account: str) -> Optional[tuple[dict[str, dict], str]]:
 
 
 def save(account: str, token: str, items: dict[str, dict]) -> None:
-    """Ghi cache (atomic: ghi file tam roi os.replace)."""
+    """Write the cache (atomic: temp file + os.replace)."""
     if not account:
         return
     payload = {
@@ -71,7 +72,7 @@ def apply_changes(
     upserts: dict[str, dict],
     removed: set[str],
 ) -> None:
-    """Cap nhat map phang tai cho theo ket qua changes.list."""
+    """Patch the flat map in place with the results of changes.list."""
     for fid in removed:
         items.pop(fid, None)
     for fid, item in upserts.items():
