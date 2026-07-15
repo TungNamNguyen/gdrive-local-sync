@@ -29,7 +29,7 @@ from services.compare import (  # noqa: E402
     REMOTE_ONLY,
     compare_maps,
 )
-from services.gdrive import RemoteFile, _safe_name  # noqa: E402
+from services.gdrive import FOLDER_MIME, DriveClient, RemoteFile, _safe_name  # noqa: E402
 from services.scanner import LocalFile, md5_of, scan_local  # noqa: E402
 from services.sync import (  # noqa: E402
     CONFLICT_FORCE,
@@ -188,6 +188,73 @@ def test_safe_name_neutralizes_traversal():
     assert _safe_name(".") == "_"
     assert _safe_name("normal.txt") == "normal.txt"
     assert _safe_name("..foo") == "..foo"  # only a bare ".." is dangerous
+
+
+class _FakeExec:
+    def __init__(self, value):
+        self._value = value
+
+    def execute(self, num_retries=0):
+        return self._value
+
+
+class _FakeFiles:
+    """Service gia du de test list_tree: 1 lan get(root) + list() phan trang."""
+
+    def __init__(self, pages, root_id):
+        self._pages = pages
+        self._root_id = root_id
+
+    def get(self, fileId, fields):  # noqa: N803 — khop chu ky Google client
+        return _FakeExec({"id": self._root_id})
+
+    def list(self, q, fields, pageSize, pageToken=None):  # noqa: N803
+        idx = pageToken or 0
+        page = dict(self._pages[idx])
+        if idx + 1 < len(self._pages):
+            page["nextPageToken"] = idx + 1
+        return _FakeExec(page)
+
+
+class _FakeService:
+    def __init__(self, pages, root_id):
+        self._files = _FakeFiles(pages, root_id)
+
+    def files(self):
+        return self._files
+
+
+def test_list_tree_flat_reconstruction():
+    pages = [
+        {
+            "files": [
+                {"id": "R", "name": "My Drive", "mimeType": FOLDER_MIME, "parents": []},
+                {"id": "A", "name": "Photos", "mimeType": FOLDER_MIME, "parents": ["R"]},
+                {"id": "f1", "name": "a.txt", "mimeType": "text/plain", "size": "10",
+                 "md5Checksum": "x", "modifiedTime": "2024-01-01T00:00:00.000Z",
+                 "parents": ["A"]},
+            ]
+        },
+        {
+            "files": [
+                {"id": "f2", "name": "b.bin", "mimeType": "application/octet-stream",
+                 "size": "20", "md5Checksum": "y",
+                 "modifiedTime": "2024-01-01T00:00:00.000Z", "parents": ["R"]},
+                # Muc ngoai cay root (parents lung tung) -> phai bi bo qua.
+                {"id": "f3", "name": "orphan.bin", "mimeType": "application/octet-stream",
+                 "size": "5", "parents": ["ZZZ"]},
+            ]
+        },
+    ]
+    client = DriveClient.__new__(DriveClient)  # bo qua __init__ (khong can creds that)
+    client.service = _FakeService(pages, root_id="R")
+
+    files, folders, warnings = client.list_tree("root")
+
+    assert set(files.keys()) == {"Photos/a.txt", "b.bin"}, files.keys()
+    assert folders[""] == "R" and folders["Photos"] == "A"
+    assert files["Photos/a.txt"].size == 10 and files["b.bin"].md5 == "y"
+    assert "orphan.bin" not in {f.name for f in files.values()}
 
 
 def test_safe_join_blocks_escape():
