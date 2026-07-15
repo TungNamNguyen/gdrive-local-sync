@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Streamlit web app that compares and syncs files between a locally mounted **Seagate external drive** and **Google Drive (My Drive)**, deployed as a hardened Docker Compose service. UI language is **Vietnamese**; code, comments, and docs are English.
 
-Core features: scan both sides → compare by relative path (size match by default, optional MD5) → build a sync plan (up / down / two-way, conflict policy, optional mirror deletions) → execute in a background thread with live progress (files, bytes, speed, ETA, cancel) → record every run in SQLite history.
+Core features: scan both sides (Drive side incrementally via the Changes API when cached) → compare by relative path (size match) → build a sync plan (up / down / two-way, conflict policy, optional mirror deletions) → execute with parallel workers in a background thread with live progress (files, bytes, speed, ETA, cancel) → record every run in SQLite history.
 
 ## Tech Stack
 
@@ -25,9 +25,10 @@ app/
   utils.py           # human_size / human_rate / human_eta / ts_to_str
   services/          # pure Python — NO Streamlit imports allowed here
     common.py        #   SyncCancelled exception
-    scanner.py       #   LocalFile, scan_local(), md5_of()
-    gdrive.py        #   RemoteFile, OAuth helpers, DriveClient (list_tree / upload / download / trash)
+    scanner.py       #   LocalFile, scan_local()
+    gdrive.py        #   RemoteFile, OAuth helpers, build_tree(), DriveClient (fetch_all_items / fetch_changes / upload / download / trash)
     compare.py       #   compare_maps() → (items, counts, byte_totals); statuses below
+    drive_cache.py   #   JSON cache {id -> metadata} + changes-token (incremental Drive scans)
     scan.py          #   ScanState, ScanRunner (background thread: scan both sides + compare)
     sync.py          #   build_plan(), Action, ProgressState, SyncRunner (background thread)
     history.py       #   SQLite sessions: init_db / start_session / finish_session / fetch_sessions
@@ -63,16 +64,17 @@ python tests/test_logic.py
 | `SECRETS_DIR` / `DATA_DIR` | `<repo>/secrets`, `<repo>/data` (dev) · `/app/secrets`, `/app/data` (Docker) | credentials/token · SQLite DB                                                        |
 | `APP_PASSWORD`               | empty (warns)                                                                         | Login gate for the UI                                                                 |
 | `DRIVE_ROOT_FOLDER`          | `root`                                                                              | Drive folder to sync against (`root` = entire My Drive, or e.g. `Backup/Seagate`) |
+| `SYNC_WORKERS`               | `4`                                                                                 | Parallel transfer workers during sync (1 = sequential)                              |
 | `TZ`                         | —                                                                                    | e.g.`Asia/Ho_Chi_Minh`                                                              |
 
 ## Architecture & Data Flow
 
 1. **Auth** (`gdrive.py`): Web-application OAuth. `build_web_auth_url()` → user authorizes on Google → Google redirects back to the app with `?code=` (`OAUTH_REDIRECT_URI`, default `http://localhost:8501/`) → `main._handle_oauth_callback()` → `exchange_code()` → token saved to `secrets/token.json` (chmod 600, auto-refresh on load). No `Flow` object needs to survive the rerun; the page reload wipes `st.session_state`.
-2. **Scan**: `scanner.scan_local()` (os.walk, exclude patterns, regular files only) and `DriveClient.list_tree()` — **flat sweep**: one paginated `files.list(q="trashed = false", pageSize 1000)` collecting every item's `parents`, then the tree is rebuilt in memory from `root_id` (the `"root"` alias is resolved to its real folder id first). This replaces the old per-folder BFS so the API-call count is `total_items / 1000` instead of one call per folder (the big win when a Drive has many folders). Skips shortcuts, warns on duplicate names, returns file map + folder-id map keyed by POSIX relpath. Trade-off: a small subfolder root inside a huge My Drive still downloads the whole listing, but that's far fewer round-trips than walking folder-by-folder.
-3. **Compare** (`compare.py`): statuses `IDENTICAL / DIFFERENT / LOCAL_ONLY / REMOTE_ONLY / GOOGLE_NATIVE` (Vietnamese labels in `STATUS_VI`). Two passes: cheap size check first, then MD5 only for opted-in size-match candidates. mtime tolerance: 2s.
-   Steps 2–3 run inside `ScanRunner` (`scan.py`), a `threading.Thread` mirroring `SyncRunner`: own `DriveClient`, thread-safe `ScanState` (phase `local → drive → compare`, counters, MD5 %, cancel `Event`). Scanning **must not** run inline in the Streamlit script — that blocks the run and no button, including Stop, can be clicked. `scan_local` / `list_tree` / `compare_maps` all take `cancel` and raise `SyncCancelled`; a cancelled scan yields **no** partial result (partial MD5 results would mislabel unhashed same-size files as identical).
+2. **Scan**: `scanner.scan_local()` (os.walk, exclude patterns, regular files only). Drive side: **flat sweep** — one paginated `files.list(q="trashed = false", pageSize 1000)` collecting every item's `parents` (`fetch_all_items`), then the tree is rebuilt in memory by the pure function `build_tree(raw, root_id)` (the `"root"` alias resolved via `real_root_id()`). API-call count is `total_items / 1000` instead of one call per folder. **Incremental**: `ScanRunner` saves the flat map + a changes-token (`get_start_page_token()`, fetched *before* the sweep) to `drive_cache.py` (JSON in `DATA_DIR`, keyed to the account email); the next scan calls `fetch_changes(token)` (1–2 API calls), applies upserts/removals to the cached map and rebuilds the tree — no full listing. Invalid/expired token, different account, or the UI's "Quét lại toàn bộ" button falls back to a full sweep. Logout clears the cache. Skips shortcuts, warns on duplicate names, returns file map + folder-id map keyed by POSIX relpath.
+3. **Compare** (`compare.py`): statuses `IDENTICAL / DIFFERENT / LOCAL_ONLY / REMOTE_ONLY / GOOGLE_NATIVE` (Vietnamese labels in `STATUS_VI`). Same relpath + same size = identical (no content hashing). mtime tolerance: 2s.
+   Steps 2–3 run inside `ScanRunner` (`scan.py`), a `threading.Thread` mirroring `SyncRunner`: own `DriveClient`, thread-safe `ScanState` (phase `local → drive → compare`, drive mode full/incremental, counters, cancel `Event`). Scanning **must not** run inline in the Streamlit script — that blocks the run and no button, including Stop, can be clicked. `scan_local` / `fetch_all_items` / `fetch_changes` / `compare_maps` all take `cancel` and raise `SyncCancelled`; a cancelled scan yields **no** partial result.
 4. **Plan** (`sync.build_plan()`): directions `DIR_UP / DIR_DOWN / DIR_BOTH`, conflict policies `CONFLICT_NEWER / CONFLICT_FORCE / CONFLICT_SKIP`, ops `OP_UPLOAD / OP_UPDATE_REMOTE / OP_DOWNLOAD / OP_UPDATE_LOCAL / OP_TRASH_REMOTE / OP_DELETE_LOCAL` (labels in `OP_VI`). Transfers ordered by relpath; deletions (mirror mode, one-way only) always last.
-5. **Execute** (`SyncRunner`, a `threading.Thread`): creates its **own** `DriveClient` (httplib2 is not thread-safe), reports via `ProgressState` (thread-safe: lock, cancel `Event`, rolling 8s speed, ETA, log deque), writes a `history` session. UI polls `progress.snapshot()` + `time.sleep(0.7)` + `st.rerun()`; the Cancel button sets the cancel event.
+5. **Execute** (`SyncRunner`, a `threading.Thread`): transfers run in a `ThreadPoolExecutor` with `SYNC_WORKERS` (default 4) workers — each worker lazily creates its **own** `DriveClient` via `threading.local` (httplib2 is not thread-safe); deletions run only after every transfer finished (safety ordering preserved). `ensure_folder_path` is serialized behind `_folders_lock` (concurrent creation would duplicate same-name Drive folders). Progress via `ProgressState` (thread-safe: `_active` map for per-file bytes of concurrent transfers, cancel `Event`, rolling 8s speed, ETA, log deque), writes a `history` session. UI polls `progress.snapshot()` + `time.sleep(0.7)` + `st.rerun()`; the Cancel button sets the cancel event — queued actions are skipped, in-flight ones stop via the event.
 
 ## Guardrails — do not change without an explicit user request
 
@@ -86,9 +88,10 @@ python tests/test_logic.py
 
 ## Key Behaviors & Gotchas
 
-- mtime is preserved both ways (upload sets `modifiedTime`; download calls `os.utime`), so "newer wins" is trustworthy from the first sync onward. Default comparison is size-match (Drive mtimes differ before the first sync).
+- mtime is preserved both ways (upload sets `modifiedTime`; download calls `os.utime`), so "newer wins" is trustworthy from the first sync onward. Comparison is size-match (Drive mtimes differ before the first sync).
 - Downloads write to `<name>.syncpart` then `os.replace()` (atomic). Uploads are resumable, 8 MiB chunks, `num_retries=5`; **0-byte files must use the non-resumable path** (resumable upload fails on empty files).
-- Google-native files (Docs/Sheets/Slides) have no size/MD5 → status `GOOGLE_NATIVE`, always skipped.
+- Google-native files (Docs/Sheets/Slides) have no size → status `GOOGLE_NATIVE`, always skipped.
+- `drive_cache.py` stores only the fields in `_KEEP_FIELDS` (must match `_ITEM_FIELDS` in `gdrive.py`); bump `_VERSION` when the shape changes so stale caches self-invalidate.
 - Drive allows duplicate names in one folder; `list_tree` keeps the first and logs a warning. `/` in Drive filenames is replaced with `_` locally.
 - OAuth loopback over http requires `OAUTHLIB_INSECURE_TRANSPORT=1` and `OAUTHLIB_RELAX_TOKEN_SCOPE=1` (set at module import in `gdrive.py`).
 - Warn users not to modify either side while a sync is running (folder cache may create duplicates otherwise).
