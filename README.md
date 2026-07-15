@@ -1,137 +1,145 @@
-# Đồng bộ ổ Seagate ⇄ Google Drive
+# Seagate <-> Google Drive Sync
 
-Ứng dụng web (Streamlit) để **so sánh và đồng bộ** file giữa một ổ cứng gắn ngoài
-**Seagate** (mount cục bộ) và **Google Drive** (My Drive). Triển khai bằng Docker
-Compose với cấu hình bảo mật chặt. Giao diện tiếng Việt; mã nguồn tiếng Anh.
+A Streamlit web app that **compares and syncs** files between a locally mounted
+**Seagate** external drive and **Google Drive** (My Drive), deployed as a
+hardened Docker Compose service. The UI is in Vietnamese; code and docs are in
+English.
 
-## Tính năng
+## Features
 
-- **Quét** cả hai bên và **so sánh** theo đường dẫn tương đối (cùng đường dẫn +
-  cùng kích thước = giống nhau) — có tiến độ trực tiếp và nút **Dừng quét** bất
-  cứ lúc nào. Từ lần quét thứ hai, phía Drive chỉ hỏi **những gì thay đổi**
-  (Changes API) nên chỉ mất vài giây.
-- **Lập kế hoạch** đồng bộ: lên / xuống / hai chiều, chính sách xử lý xung đột,
-  tùy chọn **mirror** (xóa file thừa ở bên đích).
-- **Chạy nền** với tiến độ trực tiếp: số file, dung lượng, tốc độ, ETA, nút **Hủy**.
-- **Lịch sử** mọi phiên đồng bộ lưu trong SQLite, xuất được CSV.
-- **An toàn**: xóa luôn khôi phục được (Drive → Thùng rác, Seagate → `.sync_trash/`),
-  không bao giờ xóa vĩnh viễn.
+- **Scan** both sides and **compare** by relative path (same path + same size =
+  identical), with live progress and a **Stop** button at any time. From the
+  second scan onward the Drive side only asks for **what changed** (Changes
+  API), so it takes just a few seconds.
+- **Plan** the sync: upload / download / two-way, conflict policy, optional
+  **mirror** mode (delete files that no longer exist on the source side).
+- **Background execution** with live progress: files, bytes, speed, ETA, a
+  Cancel button, and several files transferred in parallel.
+- **History** of every sync session stored in SQLite, exportable as CSV.
+- **Safety**: deletions are always recoverable (Drive -> Trash, Seagate ->
+  `.sync_trash/`); nothing is ever hard-deleted.
 
-## Yêu cầu
+## Requirements
 
-- Docker + Docker Compose (khuyến nghị), hoặc Python 3.12 để chạy dev.
-- Một ổ Seagate đã được mount trên máy chủ.
-- **OAuth client** của Google (loại **Desktop app**) — xem bên dưới.
+- Docker + Docker Compose (recommended), or Python 3.12 for local development.
+- A Seagate drive mounted on the host.
+- A Google **OAuth client** (type **Desktop app**) — see below.
 
-## 1. Tạo OAuth client trên Google Cloud
+## 1. Create the OAuth client on Google Cloud
 
-1. Vào [Google Cloud Console](https://console.cloud.google.com/) → tạo project.
-2. **APIs & Services → Library** → bật **Google Drive API**.
-3. **APIs & Services → OAuth consent screen**: chọn *External*, điền thông tin cơ
-   bản, thêm chính email của bạn vào **Test users**.
-4. **APIs & Services → Credentials → Create Credentials → OAuth client ID** →
-   Application type **Desktop app** → **Download JSON**.
-5. Đổi tên file tải về thành `credentials.json` và đặt vào thư mục `secrets/`.
+1. Open the [Google Cloud Console](https://console.cloud.google.com/) and create a project.
+2. **APIs & Services -> Library** -> enable the **Google Drive API**.
+3. **APIs & Services -> OAuth consent screen**: choose *External*, fill in the
+   basics, and add your own email under **Test users**.
+4. **APIs & Services -> Credentials -> Create Credentials -> OAuth client ID**
+   -> application type **Desktop app** -> **Download JSON**.
+5. Rename the downloaded file to `credentials.json` and put it in `secrets/`.
 
-> Phạm vi (scope) sử dụng đúng một quyền: `https://www.googleapis.com/auth/drive`.
+> The app uses exactly one scope: `https://www.googleapis.com/auth/drive`.
 
-## 2. Chạy bằng Docker (khuyến nghị)
+## 2. Run with Docker (recommended)
 
 ```bash
-cp .env.example .env          # rồi sửa SEAGATE_MOUNT và APP_PASSWORD
+cp .env.example .env          # then set SEAGATE_MOUNT and APP_PASSWORD
 docker compose up -d --build
-docker compose logs -f        # mở http://localhost:8501
+docker compose logs -f        # open http://localhost:8501
 ```
 
-Lần đầu vào giao diện, ở thanh bên trái bấm **Bắt đầu kết nối** để liên kết Google
-Drive (xem mục *Kết nối Drive* bên dưới).
-
-## 3. Chạy dev (không cần Docker)
+## 3. Local development (no Docker)
 
 ```bash
 pip install -r requirements.txt
-SEAGATE_PATH=/đường/dẫn/tới/seagate streamlit run app/main.py
+SEAGATE_PATH=/path/to/seagate streamlit run app/main.py
 ```
 
-Tùy chọn: tạo `token.json` sẵn bằng trình duyệt trên máy (thay vì luồng dán URL):
+## Connecting Google Drive
 
-```bash
-python scripts/authorize.py
-```
+In the sidebar, click **Dang nhap voi Google** (Sign in with Google). Google
+opens its consent page and then redirects straight back to the app with the
+authorization code — nothing to copy or paste. The token is saved to
+`secrets/token.json` and refreshes automatically.
 
-## Kết nối Drive (luồng dán URL trong Docker)
+Alternatives:
 
-Container không có trình duyệt, nên dùng luồng "dán URL":
+- `python scripts/authorize.py` — generates `secrets/token.json` on the host
+  using your browser (useful before the first container start).
+- `./reconnect-drive.sh` — disconnects the current account and re-runs the
+  browser flow (`--disconnect` to only remove the token).
 
-1. Bấm **Bắt đầu kết nối** → mở link **cấp quyền Google** → **Cho phép**.
-2. Trình duyệt sẽ báo *không mở được localhost:8090* — **điều này bình thường**.
-3. Copy **toàn bộ URL** trên thanh địa chỉ (chứa `?code=...`) → dán vào ô trong
-   app → **Hoàn tất kết nối**. Token lưu vào `secrets/token.json` và tự làm mới.
+The app is not Google-verified, so the consent page shows a warning; click
+**Advanced -> Go to app** to continue.
 
-## Cách dùng
+## Usage
 
-1. **So sánh** — bấm *Quét & So sánh*. Lần đầu quét đầy đủ; các lần sau tự quét
-   nhanh (⚡ chỉ hỏi thay đổi). Nghi kết quả lệch thì bấm *🔄 Quét lại toàn bộ*.
-   Muốn ngừng giữa chừng thì bấm *⛔ Dừng quét* (quét chỉ đọc nên dừng lúc nào
-   cũng an toàn; sẽ không có kết quả so sánh, cần quét lại).
-2. **Đồng bộ** — chọn hướng + cách xử lý xung đột → *Lập kế hoạch* để xem trước →
-   *Bắt đầu đồng bộ*. Với **mirror** phải gõ `XOA` để xác nhận.
-3. **Lịch sử** — xem lại các phiên đã chạy, tải CSV.
+1. **Compare** — click *Quet & So sanh*. The first scan is a full listing;
+   later scans are incremental (only changes are fetched). If a fast scan ever
+   looks wrong, click *Quet lai toan bo* (full rescan). Click *Dung quet* to
+   stop mid-scan — scanning only reads, so stopping is always safe; you just
+   get no comparison result and need to rescan.
+2. **Sync** — pick a direction and conflict policy -> *Lap ke hoach* to preview
+   the plan -> *Bat dau dong bo*. **Mirror** mode requires typing `XOA` to
+   confirm the deletions.
+3. **History** — review past sessions, download CSV.
 
-> ⚠️ **Không sửa đổi hai bên** trong lúc đang đồng bộ.
+> **Do not modify either side** while a sync is running.
 
-## Biến môi trường
+## Environment variables
 
-| Biến                | Mặc định        | Ý nghĩa                                                        |
-| ------------------- | --------------- | ------------------------------------------------------------- |
-| `SEAGATE_MOUNT`     | *(bắt buộc)*    | Đường dẫn ổ Seagate trên host, mount vào `/data/seagate`      |
-| `SEAGATE_PATH`      | `/data/seagate` | Đường dẫn app quét (trong container / khi chạy dev)           |
-| `APP_PASSWORD`      | *(trống)*       | Mật khẩu đăng nhập giao diện (để trống sẽ cảnh báo)           |
-| `DRIVE_ROOT_FOLDER` | `root`          | Thư mục Drive để đối chiếu (`root` = toàn bộ My Drive)        |
-| `SECRETS_DIR`       | `./secrets`     | Nơi chứa `credentials.json` + `token.json`                    |
-| `DATA_DIR`          | `./data`        | Nơi chứa `sync_history.db`                                    |
-| `TZ`                | —               | Múi giờ, ví dụ `Asia/Ho_Chi_Minh`                            |
+| Variable             | Default          | Purpose                                                        |
+| -------------------- | ---------------- | -------------------------------------------------------------- |
+| `SEAGATE_MOUNT`      | *(required)*     | Host path of the Seagate drive, mounted at `/data/seagate`     |
+| `SEAGATE_PATH`       | `/data/seagate`  | Path the app scans (inside the container / in local dev)       |
+| `APP_PASSWORD`       | *(empty)*        | UI login password (empty shows a warning)                      |
+| `DRIVE_ROOT_FOLDER`  | `root`           | Drive folder to compare against (`root` = entire My Drive)     |
+| `SYNC_WORKERS`       | `4`              | Parallel transfer workers during sync (1 = sequential)         |
+| `OAUTH_REDIRECT_URI` | `http://localhost:8501/` | The app's own URL, used as the OAuth redirect          |
+| `SECRETS_DIR`        | `./secrets`      | Location of `credentials.json` + `token.json`                  |
+| `DATA_DIR`           | `./data`         | Location of `sync_history.db` and the Drive scan cache         |
+| `TZ`                 | —                | Timezone, e.g. `Asia/Ho_Chi_Minh`                              |
 
-## An toàn dữ liệu
+## Data safety
 
-- **Không xóa vĩnh viễn**: Drive → **Thùng rác**; Seagate → `.sync_trash/<thời-điểm>/`.
-- **Mirror** chỉ dùng cho đồng bộ một chiều và phải gõ `XOA` để xác nhận.
-- `mtime` được giữ nguyên hai chiều nên "bên mới hơn thắng" đáng tin cậy.
-- File Google (Docs/Sheets/Slides) không có kích thước → luôn được **bỏ qua**.
+- **Never hard-deletes**: Drive -> **Trash**; Seagate -> `.sync_trash/<timestamp>/`.
+- **Mirror** works only for one-way syncs and requires typing `XOA` to confirm.
+- `mtime` is preserved in both directions, so "newer wins" is trustworthy.
+- Google-native files (Docs/Sheets/Slides) have no size — always **skipped**.
 
-## Bảo mật triển khai
+## Deployment security
 
-- Cổng chỉ mở trên `127.0.0.1:8501`. Muốn truy cập từ xa, đặt **reverse proxy**
-  (HTTPS + xác thực) phía trước, **không** đổi sang `0.0.0.0`.
-- Container chạy **non-root** (UID 1000), rootfs **read-only** + tmpfs `/tmp`,
-  `cap_drop: [ALL]`, `no-new-privileges`.
-- Không log token/nội dung thông tin xác thực.
+- The port binds to `127.0.0.1:8501` only. For remote access put a **reverse
+  proxy** (HTTPS + auth) in front; do **not** switch to `0.0.0.0`.
+- The container runs **non-root** (UID 1000) with a **read-only** rootfs +
+  tmpfs `/tmp`, `cap_drop: [ALL]`, `no-new-privileges`.
+- Tokens and credential contents are never logged.
 
-## Kiểm thử
+## Tests
 
 ```bash
 python tests/test_logic.py
 ```
 
-## Cấu trúc thư mục
+## Repository layout
 
 ```
 app/
-  main.py            # Giao diện Streamlit (4 tab)
-  config.py          # Cấu hình từ biến môi trường
-  security.py        # Cổng đăng nhập APP_PASSWORD
-  utils.py           # Định dạng kích thước/tốc độ/thời gian
-  services/          # Logic thuần Python (không import Streamlit)
-scripts/authorize.py # Tạo token.json bằng trình duyệt (tùy chọn)
-tests/test_logic.py  # Kiểm thử bằng assert (không cần pytest)
+  main.py            # Streamlit UI (4 tabs)
+  config.py          # env-driven configuration
+  security.py        # APP_PASSWORD login gate
+  utils.py           # size/speed/time formatting
+  services/          # pure Python logic (no Streamlit imports)
+scripts/authorize.py # generate token.json via a local browser (optional)
+tests/test_logic.py  # plain assert-based tests (no pytest needed)
 secrets/             # credentials.json + token.json (gitignored)
-data/                # sync_history.db (gitignored)
+data/                # sync_history.db + drive_cache.json (gitignored)
 ```
 
-## Xử lý sự cố
+## Troubleshooting
 
-- **Thiếu `credentials.json`** → tải OAuth client (Desktop app) và đặt vào `secrets/`.
-- **Không thấy ổ Seagate** → kiểm tra `SEAGATE_MOUNT` trong `.env` và ổ đã mount chưa.
-- **`access_denied` khi cấp quyền** → thêm email của bạn vào *Test users* trong
+- **Missing `credentials.json`** -> download the OAuth client (Desktop app) and
+  put it in `secrets/`.
+- **Seagate drive not found** -> check `SEAGATE_MOUNT` in `.env` and that the
+  drive is mounted.
+- **`access_denied` during consent** -> add your email to *Test users* on the
   OAuth consent screen.
-- **Token hết hạn / lỗi refresh** → *Ngắt kết nối Drive* rồi kết nối lại.
+- **Token expired / refresh error** -> sign out of Google in the sidebar (or
+  run `./reconnect-drive.sh`) and sign in again.
