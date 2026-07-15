@@ -1,11 +1,12 @@
-"""So sanh cay file Seagate (local) voi cay file Google Drive (remote).
+"""Compare the Seagate (local) file tree with the Google Drive (remote) tree.
 
-Khoa doi chieu la duong dan tuong doi. Hai file cung duong dan va cung kich
-thuoc duoc coi la GIONG NHAU; khac kich thuoc la KHAC NHAU (kem ben nao moi
-hon theo mtime, phuc vu chinh sach "moi hon thang").
+The matching key is the relative path. Two files with the same path and the
+same size are considered IDENTICAL; different sizes mean DIFFERENT (annotated
+with which side is newer by mtime, feeding the "newer wins" policy).
 
-Luu y ve mtime: khi app upload/download, mtime duoc giu nguyen hai phia, nen
-tu lan dong bo dau tro di, so sanh "ben nao moi hon" la dang tin cay.
+Note on mtime: the app preserves mtime in both directions on upload/download,
+so from the first sync onward the "which side is newer" comparison is
+trustworthy.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from services.common import SyncCancelled
 from services.gdrive import RemoteFile
 from services.scanner import LocalFile
 
-# Trang thai so sanh
+# Comparison statuses
 IDENTICAL = "identical"
 DIFFERENT = "different"
 LOCAL_ONLY = "local_only"
@@ -35,7 +36,7 @@ STATUS_VI = {
     GOOGLE_NATIVE: "📄 File Google (bỏ qua)",
 }
 
-MTIME_TOLERANCE = 2.0  # giay — bu tru do phan giai mtime giua cac he file
+MTIME_TOLERANCE = 2.0  # seconds — absorbs mtime resolution differences between filesystems
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class ComparisonItem:
     status: str
     local: Optional[LocalFile]
     remote: Optional[RemoteFile]
-    newer: Optional[str]  # "local" | "remote" | None (chi co nghia khi DIFFERENT)
+    newer: Optional[str]  # "local" | "remote" | None (only meaningful when DIFFERENT)
 
 
 def _newer_side(local: LocalFile, remote: RemoteFile) -> Optional[str]:
@@ -58,10 +59,10 @@ def compare_maps(
     remote: dict[str, RemoteFile],
     cancel: Optional[threading.Event] = None,
 ) -> tuple[list[ComparisonItem], Counter, dict[str, int]]:
-    """Returns (items, dem_theo_trang_thai, tong_byte_theo_trang_thai).
+    """Returns (items, counts_by_status, byte_totals_by_status).
 
     Raises:
-        SyncCancelled: nguoi dung bam Dung giua chung.
+        SyncCancelled: the user pressed Stop mid-compare.
     """
     items: list[ComparisonItem] = []
     counts: Counter = Counter()
