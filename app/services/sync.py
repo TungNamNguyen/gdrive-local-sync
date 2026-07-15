@@ -1,15 +1,15 @@
-"""Engine dong bo.
+"""Sync engine.
 
-- build_plan(): tu ket qua so sanh + huong + chinh sach xung dot -> danh sach
-  Action cu the (dry-run chinh la viec hien thi ke hoach nay truoc khi chay).
-- ProgressState: trang thai tien do thread-safe cho giao dien poll.
-- SyncRunner: thread nen thuc thi ke hoach; KHONG duoc goi bat ky ham
-  Streamlit nao trong thread nay.
+- build_plan(): comparison result + direction + conflict policy -> a list of
+  concrete Actions (showing this plan before running is the dry-run).
+- ProgressState: thread-safe progress state polled by the UI.
+- SyncRunner: background thread executing the plan; NO Streamlit calls are
+  allowed anywhere in this thread.
 
-Quy tac an toan du lieu (giu nguyen khi sua doi):
-- Xoa phia Drive  -> chi chuyen vao Thung rac Drive (khoi phuc duoc).
-- Xoa phia Seagate -> chi di chuyen vao <o>/.sync_trash/<timestamp>/...
-- Download ghi ra file *.syncpart roi moi rename de (atomic).
+Data-safety rules (keep intact when modifying):
+- Drive-side delete   -> move to the Drive Trash only (recoverable).
+- Seagate-side delete -> move into <drive>/.sync_trash/<timestamp>/... only.
+- Downloads write to a *.syncpart file first, then rename (atomic).
 """
 from __future__ import annotations
 
@@ -35,10 +35,10 @@ from services.gdrive import DriveClient, RemoteFile
 from services.scanner import LocalFile
 from utils import human_size
 
-# Huong dong bo
+# Sync directions
 DIR_UP = "up"      # Seagate -> Drive
 DIR_DOWN = "down"  # Drive -> Seagate
-DIR_BOTH = "both"  # hai chieu (moi hon thang)
+DIR_BOTH = "both"  # two-way (newer wins)
 
 DIRECTION_VI = {
     DIR_UP: "Seagate → Drive",
@@ -46,18 +46,18 @@ DIRECTION_VI = {
     DIR_BOTH: "Hai chiều",
 }
 
-# Chinh sach cho file "khac nhau"
-CONFLICT_NEWER = "newer"  # chi ghi de neu phia nguon moi hon
-CONFLICT_FORCE = "force"  # luon ghi de theo huong da chon
-CONFLICT_SKIP = "skip"    # bo qua
+# Policies for "different" files
+CONFLICT_NEWER = "newer"  # only overwrite when the source side is newer
+CONFLICT_FORCE = "force"  # always overwrite in the chosen direction
+CONFLICT_SKIP = "skip"    # skip
 
-# Cac loai thao tac
-OP_UPLOAD = "upload"                # tao moi tren Drive
-OP_UPDATE_REMOTE = "update_remote"  # ghi de noi dung file Drive co san
-OP_DOWNLOAD = "download"            # tao moi tren Seagate
-OP_UPDATE_LOCAL = "update_local"    # ghi de file Seagate co san
-OP_TRASH_REMOTE = "trash_remote"    # mirror: chuyen file Drive vao Thung rac
-OP_DELETE_LOCAL = "delete_local"    # mirror: chuyen file Seagate vao .sync_trash
+# Operation kinds
+OP_UPLOAD = "upload"                # create new on Drive
+OP_UPDATE_REMOTE = "update_remote"  # overwrite an existing Drive file
+OP_DOWNLOAD = "download"            # create new on the Seagate drive
+OP_UPDATE_LOCAL = "update_local"    # overwrite an existing Seagate file
+OP_TRASH_REMOTE = "trash_remote"    # mirror: move a Drive file to the Trash
+OP_DELETE_LOCAL = "delete_local"    # mirror: move a Seagate file into .sync_trash
 
 OP_VI = {
     OP_UPLOAD: "⬆️ Tải lên (mới)",
@@ -75,16 +75,16 @@ _TRANSFER_OPS = {OP_UPLOAD, OP_UPDATE_REMOTE, OP_DOWNLOAD, OP_UPDATE_LOCAL}
 class Action:
     op: str
     relpath: str
-    size: int  # byte se truyen tai (0 voi thao tac xoa)
+    size: int  # bytes to transfer (0 for deletions)
     local: Optional[LocalFile]
     remote: Optional[RemoteFile]
 
 
 def _safe_join(root: Path, relpath: str) -> Path:
-    """Ghep relpath vao root, DAM BAO ket qua khong thoat ra ngoai root.
+    """Join relpath onto root, GUARANTEEING the result stays inside root.
 
-    Phong thu theo chieu sau: du ten file da duoc trung hoa o tang scan/Drive,
-    van kiem tra lai truoc khi ghi de/ tao file cuc bo.
+    Defense in depth: even though names are neutralized at the scan/Drive
+    layer, re-check before overwriting/creating any local file.
     """
     dest = root.joinpath(*PurePosixPath(relpath).parts)
     root_resolved = root.resolve()
@@ -101,7 +101,7 @@ def build_plan(
     conflict: str,
     mirror: bool,
 ) -> tuple[list[Action], int]:
-    """Returns (actions, so_xung_dot_bi_bo_qua). Thu tu: truyen tai truoc, xoa sau."""
+    """Returns (actions, skipped_conflict_count). Order: transfers first, deletions last."""
     transfers: list[Action] = []
     deletions: list[Action] = []
     skipped_conflicts = 0
@@ -139,7 +139,7 @@ def build_plan(
                     )
                 else:
                     skipped_conflicts += 1
-            else:  # DIR_BOTH: "moi hon thang"; khong xac dinh duoc -> bo qua
+            else:  # DIR_BOTH: "newer wins"; undeterminable -> skip
                 if conflict == CONFLICT_SKIP or it.newer is None:
                     skipped_conflicts += 1
                 elif it.newer == "local":
@@ -150,7 +150,7 @@ def build_plan(
                     transfers.append(
                         Action(OP_UPDATE_LOCAL, it.relpath, it.remote.size or 0, it.local, it.remote)
                     )
-        # IDENTICAL & GOOGLE_NATIVE: khong lam gi.
+        # IDENTICAL & GOOGLE_NATIVE: nothing to do.
 
     transfers.sort(key=lambda a: a.relpath.casefold())
     deletions.sort(key=lambda a: a.relpath.casefold())
@@ -158,10 +158,10 @@ def build_plan(
 
 
 class ProgressState:
-    """Trang thai tien do dung chung giua cac worker dong bo va giao dien.
+    """Progress state shared between the sync workers and the UI.
 
-    Nhieu file co the dang truyen CUNG LUC (SyncRunner chay song song), nen
-    tien do tung file theo o `_active` {relpath -> [size, da_truyen]}.
+    Several files can be transferring AT ONCE (SyncRunner runs in parallel),
+    so per-file progress lives in `_active` {relpath -> [size, transferred]}.
     """
 
     def __init__(self, total_files: int, total_bytes: int, direction: str, mode: str):
@@ -171,7 +171,7 @@ class ProgressState:
         self.total_bytes = total_bytes
         self.direction = direction
         self.mode = mode
-        self._base_bytes = 0        # byte cua cac file DA xong
+        self._base_bytes = 0        # bytes of files that are DONE
         self._active: dict[str, list[int]] = {}  # relpath -> [size, transferred]
         self.done_files = 0
         self.failed_files = 0
@@ -186,7 +186,7 @@ class ProgressState:
     def _inflight_bytes(self) -> int:
         return sum(t for _s, t in self._active.values())
 
-    # ---- ghi (goi tu cac worker dong bo) ----
+    # ---- writes (called from the sync workers) ----
     def log(self, message: str) -> None:
         with self._lock:
             self._log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
@@ -233,7 +233,7 @@ class ProgressState:
             self.finished = True
             self._log.append(f"[{time.strftime('%H:%M:%S')}] 🏁 Kết thúc phiên đồng bộ.")
 
-    # ---- doc (goi tu giao dien) ----
+    # ---- reads (called from the UI) ----
     def snapshot(self) -> dict:
         with self._lock:
             done_bytes = self._base_bytes + self._inflight_bytes()
@@ -267,13 +267,13 @@ class ProgressState:
 
 
 class SyncRunner(threading.Thread):
-    """Thread dieu phoi ke hoach dong bo. Giao dien poll qua `progress`.
+    """Thread orchestrating the sync plan. The UI polls via `progress`.
 
-    Cac thao tac TRUYEN TAI chay song song `workers` file mot luc (nhanh ro
-    ret voi nhieu file nho — thoi gian chu yeu la cho do tre tung luot goi).
-    Cac thao tac XOA (mirror) chi chay SAU khi moi truyen tai xong (giu dung
-    thu tu an toan cua build_plan). Moi worker co DriveClient rieng (httplib2
-    khong thread-safe).
+    TRANSFER operations run in parallel, `workers` files at a time (a clear
+    win with many small files — time is dominated by per-request latency).
+    DELETE operations (mirror) only run AFTER every transfer has finished
+    (preserving build_plan's safety ordering). Each worker gets its own
+    DriveClient (httplib2 is not thread-safe).
     """
 
     def __init__(
@@ -296,9 +296,10 @@ class SyncRunner(threading.Thread):
         self.progress = progress
         self.workers = max(1, workers if workers is not None else SYNC_WORKERS)
         self._make_client = client_factory or (lambda: DriveClient(self.creds))
-        # ensure_folder_path doc/ghi cache `folders` dung chung va co the TAO
-        # thu muc — phai tuan tu hoa, khong thi hai worker tao trung thu muc
-        # (Drive cho phep trung ten -> cay bi nhan doi).
+        # ensure_folder_path reads/writes the shared `folders` cache and may
+        # CREATE folders — it must be serialized, otherwise two workers could
+        # create the same folder twice (Drive allows duplicate names -> the
+        # tree gets duplicated).
         self._folders_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -310,7 +311,7 @@ class SyncRunner(threading.Thread):
             p.log(f"Bắt đầu — hướng: {DIRECTION_VI.get(p.direction, p.direction)}, "
                   f"{p.total_files:,} thao tác, {human_size(p.total_bytes)}, "
                   f"{self.workers} luồng song song.")
-            client = self._make_client()  # client cua thread dieu phoi
+            client = self._make_client()  # client for the orchestrating thread
 
             needs_remote_write = any(
                 a.op in (OP_UPLOAD, OP_UPDATE_REMOTE) for a in self.actions
@@ -343,7 +344,7 @@ class SyncRunner(threading.Thread):
                 status = "done_with_errors"
             else:
                 status = "success"
-        except Exception as exc:  # noqa: BLE001 — loi truoc/ngoai vong lap file
+        except Exception as exc:  # noqa: BLE001 — errors before/outside the per-file loop
             p.fatal(str(exc))
             status = "error"
         finally:
@@ -358,7 +359,7 @@ class SyncRunner(threading.Thread):
                         status=status,
                         errors=snap["errors"],
                     )
-                except Exception:  # noqa: BLE001 — khong de loi ghi lich su che loi chinh
+                except Exception:  # noqa: BLE001 — a history write error must not mask the real one
                     pass
             p.mark_finished()
 
@@ -369,15 +370,15 @@ class SyncRunner(threading.Thread):
         folders: dict[str, str],
         trash_stamp: str,
     ) -> None:
-        """Chay mot dot thao tac song song; ket thuc khi MOI thao tac xong.
+        """Run one batch of actions in parallel; returns when EVERY action is done.
 
-        Worker kiem tra cancel truoc moi thao tac: bam Huy thi cac thao tac
-        chua bat dau duoc bo qua, thao tac dang truyen tu dung qua cancel Event.
+        Workers check cancel before each action: after Cancel, actions not yet
+        started are skipped and in-flight ones stop via the cancel Event.
         """
         if not actions:
             return
         p = self.progress
-        tls = threading.local()  # moi worker thread mot DriveClient rieng
+        tls = threading.local()  # one DriveClient per worker thread
 
         def _worker(action: Action) -> None:
             if p.cancel.is_set():
@@ -392,7 +393,7 @@ class SyncRunner(threading.Thread):
             except SyncCancelled:
                 p.finish_file(action.relpath, ok=False,
                               error=f"{action.relpath}: đã hủy giữa chừng")
-            except Exception as exc:  # noqa: BLE001 — 1 file loi khong dung ca phien
+            except Exception as exc:  # noqa: BLE001 — one failed file must not stop the session
                 p.finish_file(action.relpath, ok=False, error=f"{action.relpath}: {exc}")
 
         with ThreadPoolExecutor(
@@ -451,5 +452,5 @@ class SyncRunner(threading.Thread):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(action.local.path), str(dest))
 
-        else:  # phong ve — khong bao gio xay ra neu build_plan dung
+        else:  # defensive — unreachable if build_plan is correct
             raise ValueError(f"Thao tác không hỗ trợ: {action.op}")
