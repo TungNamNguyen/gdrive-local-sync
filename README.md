@@ -6,9 +6,10 @@ Compose với cấu hình bảo mật chặt. Giao diện tiếng Việt; mã ng
 
 ## Tính năng
 
-- **Quét** cả hai bên và **so sánh** theo đường dẫn tương đối (mặc định so khớp
-  kích thước, tùy chọn đối chiếu **MD5** để chắc chắn nội dung giống hệt) — có
-  tiến độ trực tiếp và nút **Dừng quét** bất cứ lúc nào.
+- **Quét** cả hai bên và **so sánh** theo đường dẫn tương đối (cùng đường dẫn +
+  cùng kích thước = giống nhau) — có tiến độ trực tiếp và nút **Dừng quét** bất
+  cứ lúc nào. Từ lần quét thứ hai, phía Drive chỉ hỏi **những gì thay đổi**
+  (Changes API) nên chỉ mất vài giây.
 - **Lập kế hoạch** đồng bộ: lên / xuống / hai chiều, chính sách xử lý xung đột,
   tùy chọn **mirror** (xóa file thừa ở bên đích).
 - **Chạy nền** với tiến độ trực tiếp: số file, dung lượng, tốc độ, ETA, nút **Hủy**.
@@ -69,9 +70,10 @@ Container không có trình duyệt, nên dùng luồng "dán URL":
 
 ## Cách dùng
 
-1. **So sánh** — bấm *Quét & So sánh*; tùy chọn bật *Đối chiếu MD5*. Muốn ngừng
-   giữa chừng thì bấm *⛔ Dừng quét* (quét chỉ đọc nên dừng lúc nào cũng an toàn;
-   sẽ không có kết quả so sánh, cần quét lại).
+1. **So sánh** — bấm *Quét & So sánh*. Lần đầu quét đầy đủ; các lần sau tự quét
+   nhanh (⚡ chỉ hỏi thay đổi). Nghi kết quả lệch thì bấm *🔄 Quét lại toàn bộ*.
+   Muốn ngừng giữa chừng thì bấm *⛔ Dừng quét* (quét chỉ đọc nên dừng lúc nào
+   cũng an toàn; sẽ không có kết quả so sánh, cần quét lại).
 2. **Đồng bộ** — chọn hướng + cách xử lý xung đột → *Lập kế hoạch* để xem trước →
    *Bắt đầu đồng bộ*. Với **mirror** phải gõ `XOA` để xác nhận.
 3. **Lịch sử** — xem lại các phiên đã chạy, tải CSV.
@@ -95,7 +97,7 @@ Container không có trình duyệt, nên dùng luồng "dán URL":
 - **Không xóa vĩnh viễn**: Drive → **Thùng rác**; Seagate → `.sync_trash/<thời-điểm>/`.
 - **Mirror** chỉ dùng cho đồng bộ một chiều và phải gõ `XOA` để xác nhận.
 - `mtime` được giữ nguyên hai chiều nên "bên mới hơn thắng" đáng tin cậy.
-- File Google (Docs/Sheets/Slides) không có kích thước/MD5 → luôn được **bỏ qua**.
+- File Google (Docs/Sheets/Slides) không có kích thước → luôn được **bỏ qua**.
 
 ## Bảo mật triển khai
 
