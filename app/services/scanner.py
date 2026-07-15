@@ -6,7 +6,6 @@ la "chia khoa" de doi chieu voi cay thu muc tren Google Drive.
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import os
 import stat as stat_mod
 import threading
@@ -14,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-from config import HASH_CHUNK
 from services.common import SyncCancelled
 
 
@@ -92,23 +90,3 @@ def scan_local(
     if progress_cb is not None:
         progress_cb(len(files), total_bytes)
     return files, errors
-
-
-def md5_of(
-    path: Path,
-    cancel: Optional[threading.Event] = None,
-    chunk_cb: Optional[Callable[[int], None]] = None,
-) -> str:
-    """MD5 cua mot file (Drive cung dung MD5 lam checksum)."""
-    h = hashlib.md5()
-    with open(path, "rb") as fh:
-        while True:
-            if cancel is not None and cancel.is_set():
-                raise SyncCancelled()
-            block = fh.read(HASH_CHUNK)
-            if not block:
-                break
-            h.update(block)
-            if chunk_cb is not None:
-                chunk_cb(len(block))
-    return h.hexdigest()
