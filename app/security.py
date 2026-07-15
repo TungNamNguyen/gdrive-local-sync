@@ -34,7 +34,6 @@ def require_login() -> None:
         return
 
     st.title("🔐 Seagate ⇄ Google Drive Sync")
-    st.caption("Nhập mật khẩu (biến `APP_PASSWORD` trong file `.env`) để tiếp tục.")
     with st.form("login_form"):
         entered = st.text_input("Mật khẩu", type="password")
         submitted = st.form_submit_button("Đăng nhập", type="primary")
