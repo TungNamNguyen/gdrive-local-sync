@@ -1,12 +1,15 @@
-"""Lop bao Google Drive API v3.
+"""Wrapper around the Google Drive API v3.
 
-Bao gom:
-- OAuth kieu web: build_web_auth_url() tao link dang nhap redirect ve chinh
-  app (?code=...); exchange_code() doi code lay token. REDIRECT_URI (cong 8090)
-  chi phuc vu helper host-side scripts/authorize.py (mo trinh duyet, tu bat code).
-- Liet ke toan bo cay thu muc (BFS) -> {relpath -> RemoteFile}.
-- Upload resumable (giu nguyen mtime qua truong modifiedTime), download theo
-  chunk ve file .syncpart roi rename atomic, chuyen file vao Thung rac Drive.
+Contains:
+- Web-style OAuth: build_web_auth_url() creates a sign-in link that redirects
+  back to the app itself (?code=...); exchange_code() trades the code for a
+  token. REDIRECT_URI (port 8090) only serves the host-side helper
+  scripts/authorize.py (opens a browser, captures the code automatically).
+- Full flat listing + in-memory tree building -> {relpath -> RemoteFile},
+  plus incremental listing via the Changes API.
+- Resumable uploads (mtime preserved through modifiedTime), chunked downloads
+  to a .syncpart file followed by an atomic rename, and moving files to the
+  Drive Trash.
 """
 from __future__ import annotations
 
@@ -17,10 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
-# Redirect loopback dung http (khong phai https) — hop le theo chuan OAuth
-# cho "installed app", nhung oauthlib mac dinh chan http. Hai bien nay chi
-# noi long kiem tra PHIA CLIENT cho URL dan vao; token van trao doi qua HTTPS
-# toi may chu Google.
+# The loopback redirect uses http (not https) — valid per the OAuth spec for
+# "installed apps", but oauthlib rejects http by default. These two variables
+# only relax the CLIENT-side checks for the pasted URL; the token exchange
+# itself still goes over HTTPS to Google's servers.
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
@@ -44,8 +47,9 @@ SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps"
 REDIRECT_URI = "http://localhost:8090/"
 
-# Truong metadata dung chung cho files.list va changes.list — cache o
-# drive_cache.py luu dung cac truong nay, them bot phai xoa cache cu.
+# Metadata fields shared by files.list and changes.list — the cache in
+# drive_cache.py stores exactly these fields; changing them requires clearing
+# old caches.
 _ITEM_FIELDS = "id, name, mimeType, size, modifiedTime, parents"
 _LIST_FIELDS = f"nextPageToken, files({_ITEM_FIELDS})"
 _CHANGES_FIELDS = (
@@ -58,7 +62,7 @@ class RemoteFile:
     id: str
     name: str
     relpath: str
-    size: Optional[int]      # None voi file Google native (Docs/Sheets/...)
+    size: Optional[int]      # None for Google-native files (Docs/Sheets/...)
     mtime: float
     mime: str
 
@@ -68,7 +72,7 @@ class RemoteFile:
 
 
 # --------------------------------------------------------------------------- #
-# Chuyen doi thoi gian
+# Time conversion
 # --------------------------------------------------------------------------- #
 def _rfc3339_to_ts(value: str) -> float:
     try:
@@ -83,16 +87,16 @@ def _ts_to_rfc3339(ts: float) -> str:
 
 
 def _escape_q(value: str) -> str:
-    """Escape gia tri chuoi trong query cua Drive API."""
+    """Escape a string value inside a Drive API query."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _safe_name(name: str) -> str:
-    """Trung hoa ten Drive de dung an toan lam MOT thanh phan duong dan cuc bo.
+    """Neutralize a Drive name so it is safe as ONE local path component.
 
-    Drive cho phep ten tuy y (ke ca "/", "\\", ".", ".."). Neu giu nguyen,
-    mot file ten ".." co the khien duong dan tai xuong thoat ra ngoai thu muc
-    goc (path traversal). Ta thay separator bang "_" va vo hieu hoa "."/"..".
+    Drive allows arbitrary names (including "/", "\\", ".", ".."). Left as-is,
+    a file named ".." could make the download path escape the root directory
+    (path traversal). Replace separators with "_" and defuse "."/"..".
     """
     name = name.replace("/", "_").replace("\\", "_").replace("\x00", "_")
     if name in (".", ".."):
@@ -104,15 +108,16 @@ def build_tree(
     raw: dict[str, dict],
     root_id: str,
 ) -> tuple[dict[str, RemoteFile], dict[str, str], list[str]]:
-    """Dung cay {relpath -> ...} tu map phang {id -> metadata} — thuan bo nho.
+    """Build the {relpath -> ...} tree from the flat {id -> metadata} map — pure in-memory.
 
-    Ham thuan (khong goi API) de quet tang dan dung lai duoc: cache giu map
-    phang, moi lan quet chi cap nhat map roi dung lai cay tu root bat ky.
+    A pure function (no API calls) so incremental scans can reuse it: the cache
+    keeps the flat map, each scan just patches the map and rebuilds the tree
+    from any root.
 
     Returns:
         files:    {relpath -> RemoteFile}
-        folders:  {relpath -> folder_id} (bao gom "" -> root_id)
-        warnings: shortcut bi bo qua, ten trung lap...
+        folders:  {relpath -> folder_id} (includes "" -> root_id)
+        warnings: skipped shortcuts, duplicate names...
     """
     children: dict[str, list[dict]] = {}
     for f in raw.values():
@@ -126,12 +131,12 @@ def build_tree(
     queue: list[tuple[str, str]] = [("", root_id)]
     while queue:
         rel_dir, folder_id = queue.pop(0)
-        if folder_id in visited:  # phong ve vong lap (parents da hong)
+        if folder_id in visited:  # cycle guard (corrupted parents)
             continue
         visited.add(folder_id)
         for f in children.get(folder_id, []):
-            # Ten tren Drive co the chua ky tu khong hop le lam duong dan
-            # cuc bo (vd "/", "..") — trung hoa truoc khi ghep relpath.
+            # Drive names may contain characters that are invalid as local
+            # paths (e.g. "/", "..") — neutralize before joining the relpath.
             name = _safe_name(f["name"])
             rel = f"{rel_dir}/{name}" if rel_dir else name
             mime = f.get("mimeType", "")
@@ -168,7 +173,7 @@ def save_credentials(creds: Credentials) -> None:
     try:
         os.chmod(TOKEN_FILE, 0o600)
     except OSError:
-        pass  # vi du: bind mount tu Windows khong ho tro chmod
+        pass  # e.g. a bind mount from Windows may not support chmod
 
 
 def delete_credentials() -> None:
@@ -176,7 +181,7 @@ def delete_credentials() -> None:
 
 
 def load_saved_credentials() -> Optional[Credentials]:
-    """Doc token.json; tu dong refresh neu het han. None neu chua dang nhap."""
+    """Read token.json; auto-refresh when expired. None if not signed in."""
     if not TOKEN_FILE.exists():
         return None
     try:
@@ -196,19 +201,20 @@ def load_saved_credentials() -> Optional[Credentials]:
 
 
 # --------------------------------------------------------------------------- #
-# OAuth kieu web ("Dang nhap voi Google" ngay trong app)
+# Web-style OAuth ("Sign in with Google" inside the app)
 # --------------------------------------------------------------------------- #
-# App dung chinh URL cua no lam redirect. Sau khi cho phep, trinh duyet quay ve
-# app kem ?code=... App tu doi lay token. Vi trang RELOAD hoan toan khi redirect
-# (Streamlit mat session_state), ta KHONG dung PKCE va KHONG luu state: flow
-# duoc dung lai tu credentials.json va chi can `code` de doi token.
+# The app uses its own URL as the redirect. After the user grants access, the
+# browser returns to the app with ?code=... and the app exchanges it for a
+# token. Because the page fully RELOADS on redirect (Streamlit loses its
+# session_state), we use neither PKCE nor stored state: the flow is rebuilt
+# from credentials.json and only `code` is needed for the exchange.
 def build_web_auth_url(redirect_uri: str) -> str:
-    """Tao URL trang dang nhap Google (redirect ve chinh app)."""
+    """Create the Google sign-in URL (redirecting back to the app itself)."""
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_FILE),
         scopes=SCOPES,
         redirect_uri=redirect_uri,
-        autogenerate_code_verifier=False,  # tat PKCE de doi token khong can flow cu
+        autogenerate_code_verifier=False,  # no PKCE so the exchange needs no original flow
     )
     auth_url, _state = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true"
@@ -217,7 +223,7 @@ def build_web_auth_url(redirect_uri: str) -> str:
 
 
 def exchange_code(code: str, redirect_uri: str) -> Credentials:
-    """Doi authorization code (lay tu query param) lay token va luu lai."""
+    """Exchange the authorization code (from the query param) for a token and save it."""
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_FILE),
         scopes=SCOPES,
@@ -234,12 +240,12 @@ def exchange_code(code: str, redirect_uri: str) -> Credentials:
 # Drive client
 # --------------------------------------------------------------------------- #
 class DriveClient:
-    """Moi thread PHAI tu tao DriveClient rieng (httplib2 khong thread-safe)."""
+    """Every thread MUST create its own DriveClient (httplib2 is not thread-safe)."""
 
     def __init__(self, creds: Credentials):
         self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    # ---- Thong tin tai khoan ----
+    # ---- Account info ----
     def user_email(self) -> str:
         about = (
             self.service.about().get(fields="user(emailAddress,displayName)").execute(num_retries=3)
@@ -247,9 +253,9 @@ class DriveClient:
         user = about.get("user", {})
         return user.get("emailAddress") or user.get("displayName") or "(không rõ)"
 
-    # ---- Thu muc ----
+    # ---- Folders ----
     def resolve_folder_path(self, path: str, create: bool = False) -> str:
-        """'root' hoac 'A/B/C' -> folder id. create=True: tao cac cap con thieu."""
+        """'root' or 'A/B/C' -> folder id. create=True: create missing levels."""
         path = (path or "").strip().strip("/")
         if path in ("", "root", "My Drive", "MyDrive"):
             return "root"
@@ -279,10 +285,10 @@ class DriveClient:
         return created["id"]
 
     def ensure_folder_path(self, relpath: str, folders: dict[str, str]) -> str:
-        """Bao dam chuoi thu muc `relpath` (POSIX, '' = goc) ton tai; tra ve id.
+        """Ensure the folder chain `relpath` (POSIX, '' = root) exists; return its id.
 
-        `folders` la cache {relpath -> id} (bat dau tu ket qua list_tree) va
-        duoc cap nhat tai cho khi tao thu muc moi.
+        `folders` is a {relpath -> id} cache (seeded from the scan result) and
+        is updated in place as new folders are created.
         """
         if relpath in folders:
             return folders[relpath]
@@ -298,15 +304,15 @@ class DriveClient:
             folders[current] = parent_id
         return parent_id
 
-    # ---- Liet ke ----
+    # ---- Listing ----
     def real_root_id(self) -> str:
-        """Doi bi danh "root" ra id that cua My Drive (can de ghep cay theo parents)."""
+        """Resolve the "root" alias to the real My Drive id (needed to match parents)."""
         return (
             self.service.files().get(fileId="root", fields="id").execute(num_retries=3)["id"]
         )
 
     def get_start_page_token(self) -> str:
-        """Diem neo cho changes.list — lay TRUOC khi quet phang de khong lot thay doi."""
+        """Anchor for changes.list — fetched BEFORE the flat sweep so no change is missed."""
         resp = (
             self.service.changes()
             .getStartPageToken(fields="startPageToken")
@@ -319,10 +325,10 @@ class DriveClient:
         progress_cb: Optional[Callable[[int, int], None]] = None,
         cancel: Optional[threading.Event] = None,
     ) -> dict[str, dict]:
-        """Quet phang: lay het muc chua bi xoa, 1000 muc/luot -> {id -> metadata}.
+        """Flat sweep: fetch every non-trashed item, 1000 per page -> {id -> metadata}.
 
-        So luot goi API = tong so muc / 1000 (thay vi 1 luot cho MOI thu muc
-        nhu BFS cu — nhanh hon hang chuc lan khi Drive nhieu thu muc).
+        API-call count = total items / 1000 (instead of one call per folder as
+        in the old BFS — tens of times faster when Drive has many folders).
         """
         raw: dict[str, dict] = {}
         n_files = n_folders = 0
@@ -347,7 +353,7 @@ class DriveClient:
                 else:
                     n_files += 1
             if progress_cb is not None:
-                progress_cb(n_files, n_folders)  # tho: gom ca ngoai root, du de thay tien do
+                progress_cb(n_files, n_folders)  # rough: includes items outside the root, good enough for progress
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -358,15 +364,15 @@ class DriveClient:
         page_token: str,
         cancel: Optional[threading.Event] = None,
     ) -> tuple[dict[str, dict], set[str], str]:
-        """Hoi Drive "tu token nay co gi thay doi?" (quet tang dan).
+        """Ask Drive "what changed since this token?" (incremental scan).
 
         Returns:
-            (upserts, removed_ids, new_token) — upserts la metadata moi/da sua;
-            removed_ids gom ca file bi xoa han lan bi chuyen vao Thung rac.
+            (upserts, removed_ids, new_token) — upserts holds new/updated
+            metadata; removed_ids covers both hard-deleted and trashed files.
 
         Raises:
-            googleapiclient HttpError neu token het han/khong hop le — caller
-            phai bat va quay ve quet phang day du.
+            googleapiclient HttpError when the token is expired/invalid — the
+            caller must catch it and fall back to a full flat sweep.
         """
         upserts: dict[str, dict] = {}
         removed: set[str] = set()
@@ -400,15 +406,15 @@ class DriveClient:
         progress_cb: Optional[Callable[[int, int], None]] = None,
         cancel: Optional[threading.Event] = None,
     ) -> tuple[dict[str, RemoteFile], dict[str, str], list[str]]:
-        """Quet phang day du roi dung cay duoi root_id (xem build_tree)."""
+        """Full flat sweep, then build the tree under root_id (see build_tree)."""
         real_root = self.real_root_id() if root_id == "root" else root_id
         raw = self.fetch_all_items(progress_cb=progress_cb, cancel=cancel)
         files, folders, warnings = build_tree(raw, real_root)
         if progress_cb is not None:
-            progress_cb(len(files), len(folders))  # con so chinh xac sau khi loc theo root
+            progress_cb(len(files), len(folders))  # exact numbers after filtering by root
         return files, folders, warnings
 
-    # ---- Truyen tai ----
+    # ---- Transfers ----
     def upload_file(
         self,
         local_path: Path,
@@ -419,7 +425,7 @@ class DriveClient:
         progress_cb: Optional[Callable[[int], None]] = None,
         cancel: Optional[threading.Event] = None,
     ) -> str:
-        """Upload (tao moi hoac ghi de). Giu mtime cuc bo qua modifiedTime."""
+        """Upload (create or overwrite). Preserves the local mtime via modifiedTime."""
         size = local_path.stat().st_size
         modified = _ts_to_rfc3339(mtime)
 
@@ -427,7 +433,7 @@ class DriveClient:
             str(local_path),
             mimetype="application/octet-stream",
             chunksize=UPLOAD_CHUNK,
-            resumable=size > 0,  # resumable upload khong nhan file 0 byte
+            resumable=size > 0,  # resumable upload rejects 0-byte files
         )
         if existing_id:
             request = self.service.files().update(
@@ -459,7 +465,7 @@ class DriveClient:
         progress_cb: Optional[Callable[[int], None]] = None,
         cancel: Optional[threading.Event] = None,
     ) -> None:
-        """Tai ve file .syncpart truoc, xong moi rename de — khong bao gio de lai file nua vời."""
+        """Download to a .syncpart file first, rename when done — never leaves a half file."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path(str(dest) + ".syncpart")
         request = self.service.files().get_media(fileId=file_id)
@@ -483,5 +489,5 @@ class DriveClient:
             pass
 
     def trash_file(self, file_id: str) -> None:
-        """Chuyen vao Thung rac Drive (khoi phuc duoc) — KHONG xoa vinh vien."""
+        """Move to the Drive Trash (recoverable) — NEVER a permanent delete."""
         self.service.files().update(fileId=file_id, body={"trashed": True}).execute(num_retries=3)
