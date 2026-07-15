@@ -1,9 +1,9 @@
-# Cau hinh Streamlit cho ung dung tu-host (chay localhost qua Docker).
+# Streamlit configuration for a self-hosted app (runs on localhost via Docker).
 
 [client]
-# Ẩn thanh công cụ góc phải: nút "Deploy" (đẩy lên Streamlit Cloud) + menu dev.
-# App này tự host nên không cần. Đổi thành "viewer" nếu vẫn muốn giữ menu ⋮
-# (Settings/đổi theme…) nhưng bỏ nút Deploy.
+# Hide the top-right toolbar: the "Deploy" button (Streamlit Cloud) + dev menu.
+# This app is self-hosted so neither is needed. Use "viewer" instead to keep
+# the "..." menu (Settings/theme) while still hiding the Deploy button.
 toolbarMode = "minimal"
 
 [browser]
