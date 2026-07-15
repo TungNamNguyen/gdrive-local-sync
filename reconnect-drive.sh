@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# Ngắt kết nối Google Drive cũ và kết nối lại — TỰ MỞ TRÌNH DUYỆT, KHÔNG PHẢI DÁN URL.
+# Disconnect the old Google Drive account and reconnect — OPENS THE BROWSER
+# AUTOMATICALLY, no URL pasting.
 #
-# Dùng khi nào:
-#   - Muốn đổi sang tài khoản Google khác.
-#   - Token hỏng / muốn làm mới kết nối.
+# When to use:
+#   - Switching to a different Google account.
+#   - Broken token / refreshing the connection.
 #
-# Cách chạy (trong Terminal, từ thư mục dự án):
-#   ./reconnect-drive.sh                # ngắt kết nối cũ rồi kết nối lại
-#   ./reconnect-drive.sh --disconnect   # chỉ ngắt kết nối (xoá token), không kết nối lại
+# How to run (in a terminal, from the project directory):
+#   ./reconnect-drive.sh                # disconnect, then reconnect
+#   ./reconnect-drive.sh --disconnect   # disconnect only (delete the token)
 #
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -17,9 +18,9 @@ VENV=".venv-tools"
 PY="$VENV/bin/python"
 PORT=8090
 
-# --- 1. Tự cài công cụ nếu chưa có (chỉ lần đầu) ----------------------------
+# --- 1. Install the tooling on first run ------------------------------------
 if [ ! -x "$PY" ]; then
-  echo "→ Lần đầu chạy: đang cài công cụ (~1 phút)…"
+  echo "-> Lan dau chay: dang cai cong cu (~1 phut)..."
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --quiet --upgrade pip
   "$VENV/bin/pip" install --quiet \
@@ -29,30 +30,30 @@ if [ ! -x "$PY" ]; then
     google-auth-httplib2==0.2.0
 fi
 
-# --- 2. Ngắt kết nối cũ (xoá token) ----------------------------------------
+# --- 2. Disconnect the old account (delete the token) ------------------------
 if [ -f secrets/token.json ]; then
   rm -f secrets/token.json
-  echo "✅ Đã ngắt kết nối tài khoản cũ (xoá secrets/token.json)."
+  echo "Da ngat ket noi tai khoan cu (xoa secrets/token.json)."
 else
-  echo "ℹ️  Chưa có kết nối nào (không có token cũ)."
+  echo "Chua co ket noi nao (khong co token cu)."
 fi
 
-# Chỉ ngắt kết nối, dừng ở đây.
+# Disconnect only: stop here.
 if [ "${1:-}" = "--disconnect" ]; then
-  echo "→ Đã ngắt kết nối. Vào http://localhost:8501 bấm F5 để thấy trạng thái 'Chưa kết nối'."
+  echo "-> Da ngat ket noi. Vao http://localhost:8501 bam F5 de thay trang thai 'Chua ket noi'."
   exit 0
 fi
 
-# --- 3. Dọn tiến trình cấp quyền cũ (nếu còn treo cổng $PORT) ---------------
+# --- 3. Clean up a stale authorize process (if port $PORT is still held) ------
 pkill -f "scripts/authorize.py" 2>/dev/null || true
 sleep 1
 
-# --- 4. Kết nối lại: mở trình duyệt, tự bắt code ---------------------------
-echo "→ Đang mở trình duyệt để cấp quyền…"
-echo "   Trong trình duyệt: chọn tài khoản → (nếu có cảnh báo) Advanced → Go to app → Allow."
-echo "   Trang sẽ hiện 'The authentication flow has completed' là XONG."
+# --- 4. Reconnect: open the browser, capture the code automatically ----------
+echo "-> Dang mo trinh duyet de cap quyen..."
+echo "   Trong trinh duyet: chon tai khoan -> (neu co canh bao) Advanced -> Go to app -> Allow."
+echo "   Trang hien 'The authentication flow has completed' la XONG."
 echo
 "$PY" scripts/authorize.py
 
 echo
-echo "🎉 Kết nối lại thành công! Giờ vào http://localhost:8501 và bấm F5."
+echo "Ket noi lai thanh cong! Gio vao http://localhost:8501 va bam F5."
