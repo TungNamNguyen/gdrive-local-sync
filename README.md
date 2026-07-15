@@ -2,8 +2,7 @@
 
 A Streamlit web app that **compares and syncs** files between a locally mounted
 **Seagate** external drive and **Google Drive** (My Drive), deployed as a
-hardened Docker Compose service. The UI is in Vietnamese; code and docs are in
-English.
+hardened Docker Compose service.
 
 ## Features
 
