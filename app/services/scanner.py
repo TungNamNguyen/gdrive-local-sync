@@ -1,7 +1,7 @@
-"""Quet o cung Seagate (thu muc mount cuc bo).
+"""Scan the Seagate drive (a locally mounted directory).
 
-Tra ve map {duong_dan_tuong_doi (POSIX) -> LocalFile}. Duong dan tuong doi
-la "chia khoa" de doi chieu voi cay thu muc tren Google Drive.
+Returns a map {relative POSIX path -> LocalFile}. The relative path is the
+"key" used to match entries against the Google Drive tree.
 """
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ from services.common import SyncCancelled
 
 @dataclass(frozen=True)
 class LocalFile:
-    relpath: str        # duong dan tuong doi kieu POSIX, vd "Photos/2024/a.jpg"
-    path: Path          # duong dan tuyet doi tren dia
+    relpath: str        # POSIX-style relative path, e.g. "Photos/2024/a.jpg"
+    path: Path          # absolute path on disk
     size: int
     mtime: float        # unix timestamp
 
 
 def _matches_any(name: str, relpath: str, patterns: list[str]) -> bool:
-    """Khop khong phan biet hoa/thuong tren ten file HOAC duong dan tuong doi."""
+    """Case-insensitive match against the file name OR the relative path."""
     name_cf = name.casefold()
     rel_cf = relpath.casefold()
     for pat in patterns:
@@ -41,11 +41,12 @@ def scan_local(
     progress_cb: Optional[Callable[[int, int], None]] = None,
     cancel: Optional[threading.Event] = None,
 ) -> tuple[dict[str, LocalFile], list[str]]:
-    """Duyet toan bo `root`.
+    """Walk the whole `root`.
 
     Returns:
-        (files, errors) — errors la danh sach loi doc duoc bo qua (khong lam
-        hong ca lan quet, vi o roi thuong co vai file loi/khoa quyen).
+        (files, errors) — errors is the list of skipped read failures (they
+        must not abort the whole scan; removable drives often have a few
+        locked/corrupt entries).
     """
     root = Path(root)
     files: dict[str, LocalFile] = {}
@@ -62,7 +63,7 @@ def scan_local(
         rel_dir = Path(dirpath).relative_to(root)
         rel_dir_posix = "" if str(rel_dir) == "." else str(PurePosixPath(rel_dir))
 
-        # Loai bo thu muc bi loai tru ngay tai cho (os.walk se khong di vao).
+        # Prune excluded directories in place (os.walk will not descend).
         kept_dirs = []
         for d in dirnames:
             d_rel = f"{rel_dir_posix}/{d}" if rel_dir_posix else d
@@ -81,7 +82,7 @@ def scan_local(
                 errors.append(f"Không đọc được: {full} ({exc.strerror or exc})")
                 continue
             if not stat_mod.S_ISREG(st.st_mode):
-                continue  # bo qua symlink/thiet bi/socket...
+                continue  # skip symlinks/devices/sockets...
             files[rel] = LocalFile(relpath=rel, path=full, size=st.st_size, mtime=st.st_mtime)
             total_bytes += st.st_size
             if progress_cb is not None and len(files) % 500 == 0:
