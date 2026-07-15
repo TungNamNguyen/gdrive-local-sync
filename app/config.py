@@ -1,7 +1,7 @@
-"""Cau hinh trung tam cho ung dung.
+"""Central configuration for the app.
 
-Moi thiet lap deu doc tu bien moi truong de than thien voi Docker.
-Gia tri mac dinh phu hop cho ca chay dev (ngoai Docker) lan production.
+Every setting is read from environment variables to stay Docker-friendly.
+Defaults work both for local development (outside Docker) and production.
 """
 from __future__ import annotations
 
@@ -9,48 +9,49 @@ import os
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
-_DEFAULT_BASE = APP_DIR.parent  # khi chay dev: thu muc goc cua repo
+_DEFAULT_BASE = APP_DIR.parent  # repo root when running in local dev
 
-# --- Duong dan ---------------------------------------------------------------
+# --- Paths --------------------------------------------------------------------
 SECRETS_DIR = Path(os.getenv("SECRETS_DIR", str(_DEFAULT_BASE / "secrets")))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_BASE / "data")))
 SEAGATE_PATH = Path(os.getenv("SEAGATE_PATH", "/data/seagate"))
 
-CREDENTIALS_FILE = SECRETS_DIR / "credentials.json"   # OAuth client (tai tu Google Cloud)
-TOKEN_FILE = SECRETS_DIR / "token.json"               # token nguoi dung (app tu tao)
-DB_FILE = DATA_DIR / "sync_history.db"                # lich su dong bo (SQLite)
+CREDENTIALS_FILE = SECRETS_DIR / "credentials.json"   # OAuth client (from Google Cloud)
+TOKEN_FILE = SECRETS_DIR / "token.json"               # user token (created by the app)
+DB_FILE = DATA_DIR / "sync_history.db"                # sync history (SQLite)
 
-# --- Google Drive ------------------------------------------------------------
-# Pham vi "drive" la bat buoc: can doc TOAN BO My Drive de so sanh va ghi de
-# file co san. KHONG duoc tu y mo rong/thu hep scope o noi khac.
+# --- Google Drive --------------------------------------------------------------
+# The "drive" scope is required: the app must read the WHOLE My Drive to compare
+# and overwrite existing files. Never widen/narrow the scope anywhere else.
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# Thu muc goc tren Drive dung de so sanh/dong bo.
-#   "root"        -> toan bo My Drive
-#   "Backup/Seagate" -> thu muc con (tao tu dong khi upload neu chua co)
+# Root folder on Drive used for comparison/sync.
+#   "root"           -> the entire My Drive
+#   "Backup/Seagate" -> a subfolder (created automatically on upload if missing)
 DRIVE_ROOT_DEFAULT = os.getenv("DRIVE_ROOT_FOLDER", "root").strip() or "root"
 
-# --- Bao mat -----------------------------------------------------------------
+# --- Security -------------------------------------------------------------------
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
-# URL cua chinh ung dung, dung lam redirect OAuth (loopback kieu web). Sau khi
-# nguoi dung cho phep tren Google, trinh duyet quay ve day kem ?code=... va app
-# tu doi lay token. Doi neu chay sau reverse proxy (vd https://sync.example.com/).
+# The app's own URL, used as the OAuth redirect (web-style loopback). After the
+# user grants access on Google, the browser returns here with ?code=... and the
+# app exchanges it for a token. Change when behind a reverse proxy
+# (e.g. https://sync.example.com/).
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8501/")
 
-# --- Hieu nang ---------------------------------------------------------------
-UPLOAD_CHUNK = 8 * 1024 * 1024    # 8 MiB / lan gui (resumable upload)
+# --- Performance -----------------------------------------------------------------
+UPLOAD_CHUNK = 8 * 1024 * 1024    # 8 MiB per request (resumable upload)
 DOWNLOAD_CHUNK = 8 * 1024 * 1024
 
-# So file truyen song song khi dong bo (moi worker mot DriveClient rieng).
-# 3-4 la diem ngot: nhanh ro ret voi nhieu file nho, van xa gioi han rate cua
-# Drive API. Dat 1 de quay ve tuan tu.
+# Number of files transferred in parallel during sync (each worker gets its own
+# DriveClient). 3-4 is the sweet spot: clearly faster with many small files while
+# staying far below Drive API rate limits. Set 1 for sequential transfers.
 SYNC_WORKERS = max(1, int(os.getenv("SYNC_WORKERS", "4") or "4"))
 
-# Thu muc "thung rac" cuc bo tren o Seagate khi bat che do mirror huong xuong.
+# Local "trash" directory on the Seagate drive used by mirror-mode deletions.
 LOCAL_TRASH_DIRNAME = ".sync_trash"
 
-# Mau loai tru mac dinh (file he thong / rac cua Windows & macOS).
+# Default exclude patterns (Windows & macOS system/junk files).
 DEFAULT_EXCLUDES = [
     "System Volume Information",
     "$RECYCLE.BIN",
@@ -71,6 +72,6 @@ DEFAULT_EXCLUDES = [
 
 
 def ensure_dirs() -> None:
-    """Tao san cac thu muc ghi duoc (secrets/, data/)."""
+    """Create the writable directories (secrets/, data/) up front."""
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
