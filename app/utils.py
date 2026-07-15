@@ -1,4 +1,4 @@
-"""Ham tien ich dinh dang so lieu cho giao dien (kich thuoc, toc do, thoi gian)."""
+"""Number-formatting helpers for the UI (sizes, speeds, durations)."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -38,7 +38,7 @@ def human_eta(seconds: float | None) -> str:
 
 
 def ts_to_str(ts: float | None) -> str:
-    """Unix timestamp -> chuoi gio dia phuong 'YYYY-MM-DD HH:MM'."""
+    """Unix timestamp -> local-time string 'YYYY-MM-DD HH:MM'."""
     if not ts:
         return ""
     try:
