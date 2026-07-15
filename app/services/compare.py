@@ -1,8 +1,8 @@
 """So sanh cay file Seagate (local) voi cay file Google Drive (remote).
 
-Khoa doi chieu la duong dan tuong doi. Mac dinh hai file cung duong dan va
-cung kich thuoc duoc coi la GIONG NHAU (nhanh). Bat "so khop MD5" de kiem tra
-noi dung chinh xac tuyet doi (cham hon vi phai doc lai file tren o Seagate).
+Khoa doi chieu la duong dan tuong doi. Hai file cung duong dan va cung kich
+thuoc duoc coi la GIONG NHAU; khac kich thuoc la KHAC NHAU (kem ben nao moi
+hon theo mtime, phuc vu chinh sach "moi hon thang").
 
 Luu y ve mtime: khi app upload/download, mtime duoc giu nguyen hai phia, nen
 tu lan dong bo dau tro di, so sanh "ben nao moi hon" la dang tin cay.
@@ -12,11 +12,11 @@ from __future__ import annotations
 import threading
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 from services.common import SyncCancelled
 from services.gdrive import RemoteFile
-from services.scanner import LocalFile, md5_of
+from services.scanner import LocalFile
 
 # Trang thai so sanh
 IDENTICAL = "identical"
@@ -56,17 +56,12 @@ def _newer_side(local: LocalFile, remote: RemoteFile) -> Optional[str]:
 def compare_maps(
     local: dict[str, LocalFile],
     remote: dict[str, RemoteFile],
-    use_md5: bool = False,
-    hash_cb: Optional[Callable[[int, int, str], None]] = None,
     cancel: Optional[threading.Event] = None,
 ) -> tuple[list[ComparisonItem], Counter, dict[str, int]]:
     """Returns (items, dem_theo_trang_thai, tong_byte_theo_trang_thai).
 
-    hash_cb(bytes_da_hash, tong_byte_can_hash, file_hien_tai) — chi goi khi
-    use_md5=True va co file can kiem tra checksum.
-
     Raises:
-        SyncCancelled: nguoi dung bam Dung trong luc dang hash MD5.
+        SyncCancelled: nguoi dung bam Dung giua chung.
     """
     items: list[ComparisonItem] = []
     counts: Counter = Counter()
@@ -86,45 +81,16 @@ def compare_maps(
     only_local = sorted(set(local) - set(remote))
     only_remote = sorted(set(remote) - set(local))
 
-    # Vong 1: xu ly moi truong hop khong can hash.
-    md5_candidates: list[str] = []
     for rel in both:
+        if cancel is not None and cancel.is_set():
+            raise SyncCancelled()
         lf, rf = local[rel], remote[rel]
         if rf.is_google_native:
             _add(ComparisonItem(rel, GOOGLE_NATIVE, lf, rf, None))
         elif rf.size is None or lf.size != rf.size:
             _add(ComparisonItem(rel, DIFFERENT, lf, rf, _newer_side(lf, rf)))
-        elif use_md5 and rf.md5:
-            md5_candidates.append(rel)  # cung size — can hash de chac chan
         else:
             _add(ComparisonItem(rel, IDENTICAL, lf, rf, None))
-
-    # Vong 2: hash MD5 cac ung vien (co bao cao tien do).
-    if md5_candidates:
-        total_hash_bytes = sum(local[r].size for r in md5_candidates)
-        hashed = 0
-        for rel in md5_candidates:
-            if cancel is not None and cancel.is_set():
-                # Partial results would silently mislabel unhashed same-size
-                # files as identical, so cancelling discards the whole compare.
-                raise SyncCancelled()
-            lf, rf = local[rel], remote[rel]
-
-            def _chunk(n: int) -> None:
-                nonlocal hashed
-                hashed += n
-                if hash_cb is not None:
-                    hash_cb(hashed, total_hash_bytes, rel)
-
-            try:
-                digest = md5_of(lf.path, cancel=cancel, chunk_cb=_chunk)
-            except OSError:
-                _add(ComparisonItem(rel, DIFFERENT, lf, rf, _newer_side(lf, rf)))
-                continue
-            if digest == rf.md5:
-                _add(ComparisonItem(rel, IDENTICAL, lf, rf, None))
-            else:
-                _add(ComparisonItem(rel, DIFFERENT, lf, rf, _newer_side(lf, rf)))
 
     for rel in only_local:
         _add(ComparisonItem(rel, LOCAL_ONLY, local[rel], None, None))
