@@ -1,6 +1,6 @@
-"""Kieu dung chung giua cac service (tranh import vong)."""
+"""Types shared between services (avoids circular imports)."""
 from __future__ import annotations
 
 
 class SyncCancelled(Exception):
-    """Nguoi dung bam Huy — dung tac vu mot cach sach se."""
+    """The user pressed Cancel/Stop — end the task cleanly."""
