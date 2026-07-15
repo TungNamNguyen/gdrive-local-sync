@@ -45,3 +45,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Local AI/agent notes - never commit
+CLAUDE.md
