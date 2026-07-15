@@ -29,7 +29,9 @@ from services.gdrive import (
     exchange_code,
     load_saved_credentials,
 )
+from services import drive_cache
 from services.scan import (
+    DRIVE_INCREMENTAL,
     PHASE_COMPARE,
     PHASE_DRIVE,
     PHASE_LOCAL,
@@ -102,7 +104,6 @@ def _reset_comparison() -> None:
         "cmp_items",
         "cmp_counts",
         "cmp_bytes",
-        "cmp_used_md5",
         "plan_actions",
         "plan_skipped",
         "plan_meta",
@@ -190,6 +191,7 @@ def _render_account(drive_root: str) -> object | None:
         st.sidebar.success(f"Đã đăng nhập:\n\n**{email}**")
         if st.sidebar.button("🔌 Đăng xuất Google", use_container_width=True):
             delete_credentials()
+            drive_cache.clear()  # cache Drive thuoc tai khoan cu
             for key in ("creds", "remote_email"):
                 st.session_state.pop(key, None)
             _abort_scan()
@@ -252,19 +254,20 @@ def render_compare_tab(creds) -> None:
             height=180,
         )
 
-    use_md5 = st.checkbox(
-        "Đối chiếu MD5 cho file cùng kích thước (chậm hơn, chắc chắn hơn)",
-        value=False,
-        help="Mặc định chỉ so khớp kích thước. Bật MD5 để kiểm tra nội dung "
-        "chính xác tuyệt đối (phải đọc lại file trên ổ Seagate).",
-    )
-
     disabled = creds is None or not config.SEAGATE_PATH.is_dir()
     if creds is None:
         st.info("⬅️ Hãy kết nối Google Drive ở thanh bên trái trước.")
 
-    if st.button("🔍 Quét & So sánh", type="primary", disabled=disabled):
-        _start_scan(creds, use_md5)
+    col_scan, col_full = st.columns([3, 2])
+    if col_scan.button("🔍 Quét & So sánh", type="primary", disabled=disabled):
+        _start_scan(creds, force_full=False)
+    if col_full.button(
+        "🔄 Quét lại toàn bộ",
+        disabled=disabled,
+        help="Bỏ qua cache thay đổi, tải lại toàn bộ danh sách Drive từ đầu. "
+        "Dùng khi nghi kết quả quét nhanh bị lệch.",
+    ):
+        _start_scan(creds, force_full=True)
 
     if "cmp_items" not in st.session_state:
         return
@@ -272,21 +275,22 @@ def render_compare_tab(creds) -> None:
     _render_comparison_results()
 
 
-def _start_scan(creds, use_md5: bool) -> None:
+def _start_scan(creds, force_full: bool) -> None:
     """Khoi dong ScanRunner o thread nen roi rerun de vao man hinh tien do.
 
     Phai chay o thread nen thi nut Dung moi bam duoc: neu quet ngay trong lan
     chay script nay, Streamlit bi chan cho den khi quet xong.
     """
     _reset_comparison()  # ket qua cu khong con hop le tu luc bat dau quet lai
-    state = ScanState(use_md5=use_md5)
+    state = ScanState()
     runner = ScanRunner(
         creds=creds,
         seagate_root=config.SEAGATE_PATH,
         exclude_patterns=_current_excludes(),
         drive_root_path=_drive_root(),
-        use_md5=use_md5,
         state=state,
+        account=st.session_state.get("remote_email"),
+        force_full=force_full,
     )
     runner.start()
     st.session_state["scan_state"] = state
@@ -317,21 +321,14 @@ def _render_scan_progress() -> None:
     if snap["phase"] in (PHASE_DRIVE, PHASE_COMPARE):
         done_drive = snap["phase"] != PHASE_DRIVE
         icon = "✅" if done_drive else "⏳"
+        fast = " ⚡ quét nhanh (chỉ hỏi thay đổi)" if snap["drive_mode"] == DRIVE_INCREMENTAL else ""
         st.write(
             f"{icon} ☁️ **Google Drive** — {snap['drive_files']:,} tệp · "
-            f"{snap['drive_folders']:,} thư mục"
+            f"{snap['drive_folders']:,} thư mục{fast}"
         )
 
     if snap["phase"] == PHASE_COMPARE:
         st.write("⏳ 🔍 **So sánh**")
-        if snap["use_md5"] and snap["hash_total"]:
-            frac = min(snap["hash_done"] / snap["hash_total"], 1.0)
-            st.progress(
-                frac,
-                text=f"MD5 {frac * 100:.0f}% "
-                f"({human_size(snap['hash_done'])}/{human_size(snap['hash_total'])}) · "
-                f"{snap['hash_current']}",
-            )
 
     if not snap["finished"]:
         st.caption(f"Đã chạy {human_eta(snap['elapsed'])} · {PHASE_VI[snap['phase']]}")
@@ -556,10 +553,10 @@ def _render_progress() -> None:
     c3.metric("Tốc độ", human_rate(snap["speed"]))
     c4.metric("Còn lại (ETA)", human_eta(snap["eta"]))
 
-    if snap["current"]:
-        line = f"Đang xử lý: `{snap['current']}`"
-        if snap["current_frac"] is not None:
-            line += f" — {snap['current_frac'] * 100:.0f}%"
+    for rel, frac in snap["active"]:
+        line = f"Đang xử lý: `{rel}`"
+        if frac is not None:
+            line += f" — {frac * 100:.0f}%"
         st.caption(line)
 
     if snap["fatal"]:
@@ -662,9 +659,10 @@ def render_guide_tab() -> None:
 > bấm **Advanced → Go to app** để tiếp tục (an toàn vì app do chính bạn tạo).
 
 ### 2. So sánh
-- Bấm **Quét & So sánh** để đối chiếu ổ Seagate với Google Drive theo đường dẫn.
-- Mặc định so khớp **kích thước**. Bật **Đối chiếu MD5** để chắc chắn nội dung
-  giống hệt (chậm hơn).
+- Bấm **Quét & So sánh** để đối chiếu ổ Seagate với Google Drive theo đường dẫn
+  (hai file cùng đường dẫn + cùng kích thước = giống nhau).
+- Từ lần quét thứ hai, phía Drive chỉ hỏi **những gì thay đổi** nên rất nhanh (⚡).
+  Nếu nghi kết quả bị lệch, bấm **🔄 Quét lại toàn bộ**.
 - Đang quét muốn ngừng thì bấm **⛔ Dừng quét**. Quét chỉ **đọc**, nên dừng giữa
   chừng hoàn toàn an toàn — không có gì thay đổi trên ổ Seagate hay Drive; chỉ là
   không có kết quả so sánh, hãy quét lại từ đầu.
