@@ -130,10 +130,9 @@ def _render_sidebar() -> object | None:
     st.sidebar.title("🔄 Seagate ⇄ Drive")
 
     st.sidebar.subheader("Cấu hình")
+    # Duong dan o Seagate lay tu .env, khong can hien thi — chi bao khi mat o.
     seagate = config.SEAGATE_PATH
-    if seagate.is_dir():
-        st.sidebar.caption(f"💽 Ổ Seagate: `{seagate}`")
-    else:
+    if not seagate.is_dir():
         st.sidebar.error(f"Không thấy ổ Seagate tại `{seagate}` — kiểm tra kết nối/mount.")
 
     drive_root = st.sidebar.text_input(
