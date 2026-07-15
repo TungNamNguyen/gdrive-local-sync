@@ -14,6 +14,7 @@ services:
     environment:
       APP_PASSWORD: ${APP_PASSWORD:-}
       DRIVE_ROOT_FOLDER: ${DRIVE_ROOT_FOLDER:-root}
+      SYNC_WORKERS: ${SYNC_WORKERS:-4}
       TZ: ${TZ:-}
       # In-container paths (match the mounts below).
       SEAGATE_PATH: /data/seagate
