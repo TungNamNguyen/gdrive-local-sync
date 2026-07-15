@@ -1,14 +1,15 @@
-"""Giao dien Streamlit cho ung dung dong bo Seagate <-> Google Drive.
+"""Streamlit UI for the Seagate <-> Google Drive sync app.
 
-Bon tab: So sanh / Dong bo / Lich su / Huong dan. Toan bo chuoi hien thi
-bang tieng Viet; ma nguon va chu thich bang tieng Anh.
+Four tabs: Compare / Sync / History / Guide. Every user-facing string is
+Vietnamese; source code and comments are English.
 
-Luong: dang nhap (security) -> ket noi Drive (OAuth) -> quet & so sanh
-(ScanRunner) -> lap ke hoach -> dong bo (SyncRunner) -> xem lich su.
+Flow: log in (security) -> connect Drive (OAuth) -> scan & compare
+(ScanRunner) -> build a plan -> sync (SyncRunner) -> browse history.
 
-File nay la lop UI duy nhat. Moi logic nam trong app/services/* (khong
-import Streamlit). Ca hai tac vu dai (quet, dong bo) chay o thread rieng nen
-nguoi dung bam Dung/Huy duoc; UI chi doc qua snapshot() va poll.
+This file is the only UI layer. All logic lives in app/services/* (which
+never imports Streamlit). Both long-running tasks (scan, sync) run on their
+own threads so the user can press Stop/Cancel; the UI only reads snapshots
+and polls.
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ from services.sync import (
 )
 from utils import human_eta, human_rate, human_size
 
-POLL_INTERVAL = 0.7  # giay — nhip poll tien do khi dang chay (theo CLAUDE.md)
+POLL_INTERVAL = 0.7  # seconds — progress poll cadence while a task runs (per CLAUDE.md)
 
 CONFLICT_VI = {
     CONFLICT_NEWER: "Bên mới hơn thắng",
@@ -66,7 +67,7 @@ CONFLICT_VI = {
 
 
 # --------------------------------------------------------------------------- #
-# Khoi tao
+# Initialization
 # --------------------------------------------------------------------------- #
 def _init_app() -> None:
     st.set_page_config(
@@ -79,7 +80,7 @@ def _init_app() -> None:
 
 
 def _get_creds():
-    """Tra ve credentials da luu (cache trong session de tranh doc file lien tuc)."""
+    """Return the saved credentials (session-cached to avoid re-reading the file)."""
     creds = st.session_state.get("creds")
     if creds is not None:
         return creds
@@ -94,7 +95,7 @@ def _drive_root() -> str:
 
 
 def _reset_comparison() -> None:
-    """Xoa ket qua quet/so sanh/ke hoach cu (goi khi doi cau hinh nguon)."""
+    """Drop stale scan/compare/plan results (called when the source config changes)."""
     for key in (
         "local_files",
         "local_errors",
@@ -117,7 +118,7 @@ def _clear_scan() -> None:
 
 
 def _abort_scan() -> None:
-    """Dung thread quet dang chay (neu co) — goi khi doi nguon/dang xuat."""
+    """Stop a running scan thread (if any) — called on source change/logout."""
     state = st.session_state.get("scan_state")
     if state is not None:
         state.cancel.set()
@@ -125,13 +126,13 @@ def _abort_scan() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Sidebar: cau hinh + tai khoan Google
+# Sidebar: configuration + Google account
 # --------------------------------------------------------------------------- #
 def _render_sidebar() -> object | None:
     st.sidebar.title("🔄 Seagate ⇄ Drive")
 
     st.sidebar.subheader("Cấu hình")
-    # Duong dan o Seagate lay tu .env, khong can hien thi — chi bao khi mat o.
+    # The Seagate path comes from .env; no need to display it — only warn when missing.
     seagate = config.SEAGATE_PATH
     if not seagate.is_dir():
         st.sidebar.error(f"Không thấy ổ Seagate tại `{seagate}` — kiểm tra kết nối/mount.")
@@ -144,7 +145,7 @@ def _render_sidebar() -> object | None:
     drive_root = (drive_root or "root").strip() or "root"
     if drive_root != st.session_state.get("drive_root"):
         st.session_state["drive_root"] = drive_root
-        _abort_scan()  # lan quet dang chay se cho ra ket qua cua goc cu
+        _abort_scan()  # a running scan would produce results for the old root
         _reset_comparison()
 
     st.sidebar.divider()
@@ -152,10 +153,11 @@ def _render_sidebar() -> object | None:
 
 
 def _handle_oauth_callback() -> None:
-    """Xu ly khi Google redirect ve app kem ?code=... (hoac ?error=...).
+    """Handle Google redirecting back to the app with ?code=... (or ?error=...).
 
-    Trang da reload hoan toan nen session_state trong, ta doi `code` lay token
-    truc tiep tu credentials.json (khong can flow cu), luu lai, roi don URL.
+    The page fully reloaded so session_state is empty; exchange `code` for a
+    token straight from credentials.json (no original flow needed), save it,
+    then clean the URL.
     """
     params = st.query_params
     if "code" in params and st.session_state.get("creds") is None:
@@ -163,7 +165,7 @@ def _handle_oauth_callback() -> None:
             creds = exchange_code(params["code"], config.OAUTH_REDIRECT_URI)
             st.session_state["creds"] = creds
             st.session_state.pop("remote_email", None)
-        except Exception as exc:  # noqa: BLE001 — hien thi loi thay vi crash
+        except Exception as exc:  # noqa: BLE001 — show the error instead of crashing
             st.session_state["oauth_error"] = f"Đăng nhập Google thất bại: {exc}"
         st.query_params.clear()
         st.rerun()
@@ -185,13 +187,13 @@ def _render_account(drive_root: str) -> object | None:
         if not email:
             try:
                 email = DriveClient(creds).user_email()
-            except Exception as exc:  # noqa: BLE001 — chi de hien thi
+            except Exception as exc:  # noqa: BLE001 — display only
                 email = f"(không lấy được email: {exc})"
             st.session_state["remote_email"] = email
         st.sidebar.success(f"Đã đăng nhập:\n\n**{email}**")
         if st.sidebar.button("🔌 Đăng xuất Google", use_container_width=True):
             delete_credentials()
-            drive_cache.clear()  # cache Drive thuoc tai khoan cu
+            drive_cache.clear()  # the Drive cache belongs to the old account
             for key in ("creds", "remote_email"):
                 st.session_state.pop(key, None)
             _abort_scan()
@@ -199,7 +201,7 @@ def _render_account(drive_root: str) -> object | None:
             st.rerun()
         return creds
 
-    # Chua dang nhap Google --------------------------------------------------
+    # Not signed in to Google yet ---------------------------------------------
     if not CREDENTIALS_FILE.exists():
         st.sidebar.error(
             "Thiếu `secrets/credentials.json`.\n\n"
@@ -208,7 +210,7 @@ def _render_account(drive_root: str) -> object | None:
         )
         return None
 
-    # "Dang nhap voi Google": dieu huong sang trang Google, quay ve app tu dong.
+    # "Sign in with Google": navigate to Google, return to the app automatically.
     auth_url = build_web_auth_url(config.OAUTH_REDIRECT_URI)
     st.sidebar.link_button(
         "🔐 Đăng nhập với Google", auth_url, type="primary", use_container_width=True
@@ -218,7 +220,7 @@ def _render_account(drive_root: str) -> object | None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 1 — So sanh
+# Tab 1 — Compare
 # --------------------------------------------------------------------------- #
 # Never scan/sync the app's own artifacts, even if the user edits the exclude
 # box: uploading .sync_trash would re-upload files the user just deleted, and
@@ -241,7 +243,7 @@ def _current_excludes() -> list[str]:
 def render_compare_tab(creds) -> None:
     st.header("So sánh Seagate ⇄ Drive")
 
-    # Dang quet o thread nen -> chi hien tien do + nut Dung.
+    # A scan is running on the background thread -> show progress + Stop only.
     if st.session_state.get("scan_state") is not None:
         _render_scan_progress()
         return
@@ -276,12 +278,12 @@ def render_compare_tab(creds) -> None:
 
 
 def _start_scan(creds, force_full: bool) -> None:
-    """Khoi dong ScanRunner o thread nen roi rerun de vao man hinh tien do.
+    """Start ScanRunner on a background thread, then rerun into the progress screen.
 
-    Phai chay o thread nen thi nut Dung moi bam duoc: neu quet ngay trong lan
-    chay script nay, Streamlit bi chan cho den khi quet xong.
+    The background thread is what makes the Stop button clickable: scanning
+    inline in this script run would block Streamlit until the scan finished.
     """
-    _reset_comparison()  # ket qua cu khong con hop le tu luc bat dau quet lai
+    _reset_comparison()  # old results are stale the moment a rescan starts
     state = ScanState()
     runner = ScanRunner(
         creds=creds,
@@ -302,7 +304,7 @@ def _render_scan_progress() -> None:
     state: ScanState = st.session_state["scan_state"]
     snap = state.snapshot()
 
-    # Xong & thanh cong -> nap ket qua vao session roi ve man hinh ket qua.
+    # Finished successfully -> load results into the session, back to results screen.
     if snap["finished"] and snap["result"] is not None:
         st.session_state.update(snap["result"])
         _clear_scan()
@@ -341,7 +343,7 @@ def _render_scan_progress() -> None:
         st.rerun()
         return
 
-    # Da dung hoac loi -----------------------------------------------------
+    # Stopped or failed ------------------------------------------------------
     if snap["cancelled"]:
         st.info("⛔ Đã dừng quét theo yêu cầu — chưa có kết quả so sánh.")
     elif snap["error"]:
@@ -375,7 +377,7 @@ def _render_comparison_results() -> None:
             for msg in local_errors[:200]:
                 st.write(f"💽 {msg}")
 
-    # Bang chi tiet co bo loc.
+    # Detail table with a status filter.
     chosen = st.multiselect(
         "Lọc theo trạng thái",
         options=ALL_STATUSES,
@@ -408,12 +410,12 @@ def _render_comparison_results() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 2 — Dong bo
+# Tab 2 — Sync
 # --------------------------------------------------------------------------- #
 def render_sync_tab(creds) -> None:
     st.header("Đồng bộ")
 
-    # Neu dang chay (hoac vua xong) thi hien tien do, khong cho cau hinh moi.
+    # While running (or just finished) show progress; no new configuration.
     if st.session_state.get("progress") is not None:
         _render_progress()
         return
@@ -505,7 +507,7 @@ def _render_plan_and_start(creds) -> None:
         )
         st.dataframe(df, use_container_width=True, hide_index=True, height=360)
 
-    # Xac nhan mirror: bat buoc go XOA.
+    # Mirror confirmation: typing XOA is mandatory.
     can_start = True
     if meta["mirror"]:
         deletions = sum(1 for a in actions if a.op in (OP_TRASH_REMOTE, OP_DELETE_LOCAL))
@@ -575,7 +577,7 @@ def _render_progress() -> None:
         st.rerun()
         return
 
-    # Da xong -----------------------------------------------------------------
+    # Finished -----------------------------------------------------------------
     if snap["failed_files"]:
         st.warning(f"Hoàn tất với {snap['failed_files']:,} lỗi.")
         if snap["errors"]:
@@ -595,7 +597,7 @@ def _render_progress() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 3 — Lich su
+# Tab 3 — History
 # --------------------------------------------------------------------------- #
 _STATUS_LABEL = {
     "success": "✅ Thành công",
@@ -642,7 +644,7 @@ def render_history_tab() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 4 — Huong dan
+# Tab 4 — Guide
 # --------------------------------------------------------------------------- #
 def render_guide_tab() -> None:
     st.header("Hướng dẫn sử dụng")
@@ -690,7 +692,7 @@ def render_guide_tab() -> None:
 def main() -> None:
     _init_app()
     security.require_login()
-    _handle_oauth_callback()  # xu ly ?code=... khi Google redirect ve
+    _handle_oauth_callback()  # handle ?code=... when Google redirects back
 
     creds = _render_sidebar()
 
