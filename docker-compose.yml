@@ -23,7 +23,7 @@ services:
 
     volumes:
       # The Seagate drive, mounted read-write (downloads + .sync_trash).
-      - ${SEAGATE_MOUNT:?SEAGATE_MOUNT chưa được đặt trong .env}:/data/seagate
+      - ${SEAGATE_MOUNT:?SEAGATE_MOUNT is not set in .env}:/data/seagate
       # OAuth client + token (token.json is written/refreshed by the app).
       - ./secrets:/app/secrets
       # SQLite sync history.
