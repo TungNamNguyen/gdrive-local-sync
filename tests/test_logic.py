@@ -198,13 +198,13 @@ class _FakeExec:
 
 
 class _FakeFiles:
-    """Service gia du de test list_tree: 1 lan get(root) + list() phan trang."""
+    """Fake service for list_tree tests: one get(root) + paginated list()."""
 
     def __init__(self, pages, root_id):
         self._pages = pages
         self._root_id = root_id
 
-    def get(self, fileId, fields):  # noqa: N803 — khop chu ky Google client
+    def get(self, fileId, fields):  # noqa: N803 — matches the Google client signature
         return _FakeExec({"id": self._root_id})
 
     def list(self, q, fields, pageSize, pageToken=None):  # noqa: N803
@@ -216,7 +216,7 @@ class _FakeFiles:
 
 
 class _FakeChanges:
-    """changes.list gia: tra het thay doi trong 1 trang + newStartPageToken."""
+    """Fake changes.list: returns all changes in one page + newStartPageToken."""
 
     def __init__(self, changes, new_token):
         self._changes = changes
@@ -255,13 +255,13 @@ def test_list_tree_flat_reconstruction():
                 {"id": "f2", "name": "b.bin", "mimeType": "application/octet-stream",
                  "size": "20", "modifiedTime": "2024-01-01T00:00:00.000Z",
                  "parents": ["R"]},
-                # Muc ngoai cay root (parents lung tung) -> phai bi bo qua.
+                # Item outside the root tree (bogus parents) -> must be skipped.
                 {"id": "f3", "name": "orphan.bin", "mimeType": "application/octet-stream",
                  "size": "5", "parents": ["ZZZ"]},
             ]
         },
     ]
-    client = DriveClient.__new__(DriveClient)  # bo qua __init__ (khong can creds that)
+    client = DriveClient.__new__(DriveClient)  # skip __init__ (no real creds needed)
     client.service = _FakeService(pages, root_id="R")
 
     files, folders, warnings = client.list_tree("root")
@@ -273,7 +273,7 @@ def test_list_tree_flat_reconstruction():
 
 
 def test_fetch_changes_and_apply():
-    # items hien co trong cache: mot file se bi sua, mot file se bi xoa.
+    # items currently cached: one file will be modified, one deleted.
     items = {
         "f1": {"id": "f1", "name": "a.txt", "mimeType": "text/plain",
                "size": "10", "parents": ["R"]},
@@ -281,14 +281,14 @@ def test_fetch_changes_and_apply():
                "size": "20", "parents": ["R"]},
     }
     changes = [
-        # f1 doi ten + doi size
+        # f1 renamed + resized
         {"fileId": "f1", "file": {"id": "f1", "name": "a2.txt", "mimeType": "text/plain",
                                   "size": "99", "parents": ["R"], "trashed": False}},
-        # f2 bi chuyen vao thung rac -> coi nhu xoa
+        # f2 moved to the trash -> treated as removed
         {"fileId": "f2", "file": {"id": "f2", "name": "b.bin", "trashed": True}},
-        # f4 xoa han
+        # f4 hard-deleted
         {"fileId": "f4", "removed": True},
-        # f5 la file moi
+        # f5 is a new file
         {"fileId": "f5", "file": {"id": "f5", "name": "new.bin",
                                   "mimeType": "application/octet-stream",
                                   "size": "7", "parents": ["R"], "trashed": False}},
@@ -304,7 +304,7 @@ def test_fetch_changes_and_apply():
     assert set(items) == {"f1", "f5"}
     assert items["f1"]["name"] == "a2.txt" and items["f1"]["size"] == "99"
 
-    # Dung cay tu items sau cap nhat: chi con a2.txt va new.bin duoi root.
+    # Rebuild the tree from the patched items: only a2.txt and new.bin remain.
     files, _folders, _warn = build_tree(items, "R")
     assert set(files.keys()) == {"a2.txt", "new.bin"}
 
@@ -407,7 +407,7 @@ def test_plan_both_skip_policy():
 
 
 # --------------------------------------------------------------------------- #
-# cancel (nut Dung khi dang quet/so sanh)
+# cancel (the Stop button during scan/compare)
 # --------------------------------------------------------------------------- #
 def test_scan_local_cancel_raises():
     import threading
@@ -424,7 +424,7 @@ def test_scan_local_cancel_raises():
         except SyncCancelled:
             pass
         else:
-            raise AssertionError("scan_local phai raise SyncCancelled khi bi huy")
+            raise AssertionError("scan_local must raise SyncCancelled when cancelled")
 
 
 def test_compare_cancel_raises():
@@ -441,11 +441,11 @@ def test_compare_cancel_raises():
     except SyncCancelled:
         pass
     else:
-        raise AssertionError("compare_maps phai raise SyncCancelled khi bi huy")
+        raise AssertionError("compare_maps must raise SyncCancelled when cancelled")
 
 
 # --------------------------------------------------------------------------- #
-# dong bo song song
+# parallel sync
 # --------------------------------------------------------------------------- #
 def test_progress_state_tracks_parallel_files():
     p = ProgressState(total_files=2, total_bytes=30, direction=DIR_UP, mode="newer")
@@ -455,7 +455,7 @@ def test_progress_state_tracks_parallel_files():
     p.begin_file(a1)
     p.begin_file(a2)
     p.set_current_bytes("a.bin", 5)
-    p.set_current_bytes("b.bin", 100)  # vuot size -> phai bi kep ve 20
+    p.set_current_bytes("b.bin", 100)  # exceeds size -> must be clamped to 20
 
     snap = p.snapshot()
     assert snap["done_bytes"] == 25, snap["done_bytes"]
@@ -469,8 +469,8 @@ def test_progress_state_tracks_parallel_files():
 
 
 def test_sync_runner_parallel_local_deletes():
-    """Chay SyncRunner that voi 3 worker — toan thao tac xoa cuc bo (khong can
-    Drive): moi file phai duoc don vao .sync_trash va tien do phai khop."""
+    """Run a real SyncRunner with 3 workers — local deletions only (no Drive
+    needed): every file must land in .sync_trash and the progress must match."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         actions = []
@@ -488,10 +488,10 @@ def test_sync_runner_parallel_local_deletes():
             seagate_root=root,
             drive_root_path="root",
             actions=actions,
-            remote_folders={"": "root"},  # co san -> khong goi resolve tren Drive
+            remote_folders={"": "root"},  # pre-seeded -> no Drive resolve call
             progress=progress,
             workers=3,
-            client_factory=lambda: object(),  # delete_local khong dung client
+            client_factory=lambda: object(),  # delete_local never touches the client
         )
         runner.start()
         runner.join(timeout=30)
@@ -500,7 +500,7 @@ def test_sync_runner_parallel_local_deletes():
         assert not runner.is_alive()
         assert snap["finished"] and snap["fatal"] is None
         assert snap["done_files"] == 9 and snap["failed_files"] == 0
-        # Khong con file goc; tat ca nam trong .sync_trash/<timestamp>/
+        # No originals left; everything sits in .sync_trash/<timestamp>/
         assert not any(fp.name.endswith(".bin") for fp in root.iterdir() if fp.is_file())
         trash = root / config.LOCAL_TRASH_DIRNAME
         moved = list(trash.rglob("*.bin"))
@@ -518,13 +518,13 @@ def main() -> int:
             fn()
         except Exception as exc:  # noqa: BLE001
             failed += 1
-            print(f"❌ {fn.__name__}: {exc.__class__.__name__}: {exc}")
+            print(f"FAIL {fn.__name__}: {exc.__class__.__name__}: {exc}")
             import traceback
 
             traceback.print_exc()
         else:
             passed += 1
-            print(f"✅ {fn.__name__}")
+            print(f"PASS {fn.__name__}")
     print(f"\n{passed} passed, {failed} failed ({len(tests)} total).")
     return 1 if failed else 0
 
