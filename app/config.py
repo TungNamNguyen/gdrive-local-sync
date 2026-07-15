@@ -41,7 +41,11 @@ OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8501/")
 # --- Hieu nang ---------------------------------------------------------------
 UPLOAD_CHUNK = 8 * 1024 * 1024    # 8 MiB / lan gui (resumable upload)
 DOWNLOAD_CHUNK = 8 * 1024 * 1024
-HASH_CHUNK = 4 * 1024 * 1024
+
+# So file truyen song song khi dong bo (moi worker mot DriveClient rieng).
+# 3-4 la diem ngot: nhanh ro ret voi nhieu file nho, van xa gioi han rate cua
+# Drive API. Dat 1 de quay ve tuan tu.
+SYNC_WORKERS = max(1, int(os.getenv("SYNC_WORKERS", "4") or "4"))
 
 # Thu muc "thung rac" cuc bo tren o Seagate khi bat che do mirror huong xuong.
 LOCAL_TRASH_DIRNAME = ".sync_trash"
