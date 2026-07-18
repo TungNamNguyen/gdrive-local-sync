@@ -30,7 +30,7 @@ from services.gdrive import (
     exchange_code,
     load_saved_credentials,
 )
-from services import drive_cache, prefs
+from services import drive_cache
 from services.scan import (
     DRIVE_INCREMENTAL,
     PHASE_COMPARE,
@@ -94,23 +94,6 @@ def _get_creds():
     return creds
 
 
-def _seed_scope_from_prefs() -> None:
-    """Once per browser session: restore the saved scope so F5 keeps choices.
-
-    session_state is wiped on every page reload; without this the scope boxes
-    would silently revert to their env defaults.
-    """
-    if "local_subdir" in st.session_state and "drive_root" in st.session_state:
-        return
-    saved = prefs.load()
-    st.session_state.setdefault(
-        "local_subdir", saved.get("local_subdir", config.LOCAL_SUBDIR_DEFAULT)
-    )
-    st.session_state.setdefault(
-        "drive_root", saved.get("drive_root", config.DRIVE_ROOT_DEFAULT)
-    )
-
-
 def _drive_root() -> str:
     return st.session_state.get("drive_root", config.DRIVE_ROOT_DEFAULT)
 
@@ -170,7 +153,6 @@ def _abort_scan() -> None:
 # Sidebar: configuration + Google account
 # --------------------------------------------------------------------------- #
 def _render_sidebar() -> object | None:
-    _seed_scope_from_prefs()
     st.sidebar.title("🔄 Local ⇄ Drive")
 
     st.sidebar.subheader("Cấu hình")
@@ -192,7 +174,6 @@ def _render_sidebar() -> object | None:
     drive_root = (drive_input or "").strip().strip("/") or "root"
     if drive_root != st.session_state.get("drive_root"):
         st.session_state["drive_root"] = drive_root
-        prefs.save(drive_root=drive_root)
         _abort_scan()  # a running scan would produce results for the old root
         _reset_comparison()
 
@@ -206,7 +187,6 @@ def _render_sidebar() -> object | None:
     local_sub = (local_sub or "").strip().strip("/")
     if local_sub != _local_subdir():
         st.session_state["local_subdir"] = local_sub
-        prefs.save(local_subdir=local_sub)
         _abort_scan()
         _reset_comparison()
     local_root = _local_root()
@@ -543,6 +523,10 @@ def _render_comparison_results() -> None:
 # --------------------------------------------------------------------------- #
 # Tab 2 — Explorer (browse the merged tree of both sides)
 # --------------------------------------------------------------------------- #
+def _explore_goto(target: str) -> None:
+    st.session_state["explore_path"] = target
+
+
 def render_explore_tab() -> None:
     st.header("Khám phá cây thư mục")
 
@@ -552,16 +536,18 @@ def render_explore_tab() -> None:
         return
     items = st.session_state["cmp_items"]
 
-    # Navigation: home / up / current location.
+    # Navigation MUST use on_click callbacks, never `if st.button(): st.rerun()`:
+    # st.rerun() cuts the run short, so folder buttons further down are not
+    # rendered and a previously clicked one keeps its "clicked" trigger state —
+    # when it reappears (e.g. after pressing Home) it fires a phantom click
+    # that jumps back into that folder.
     path = st.session_state.get("explore_path", "")
-    c_home, c_up, c_where = st.columns([1, 1, 5])
-    if c_home.button("🏠 Gốc", disabled=not path, use_container_width=True):
-        st.session_state["explore_path"] = ""
-        st.rerun()
     parent = path.rsplit("/", 1)[0] if "/" in path else ""
-    if c_up.button("⬆️ Lên", disabled=not path, use_container_width=True):
-        st.session_state["explore_path"] = parent
-        st.rerun()
+    c_home, c_up, c_where = st.columns([1, 1, 5])
+    c_home.button("🏠 Gốc", disabled=not path, use_container_width=True,
+                  on_click=_explore_goto, args=("",))
+    c_up.button("⬆️ Lên", disabled=not path, use_container_width=True,
+                on_click=_explore_goto, args=(parent,))
     c_where.markdown(f"📁 **/{path}**" if path else "📁 **/** *(gốc)*")
 
     c_diff, c_side = st.columns([2, 3])
@@ -586,9 +572,9 @@ def render_explore_tab() -> None:
         st.caption(f"{len(subfolders):,} thư mục con")
         for name, total, diff, local_b, remote_b in subfolders[:200]:
             col_btn, col_info = st.columns([4, 4])
-            if col_btn.button(f"📁 {name}", key=f"exp:{path}/{name}", use_container_width=True):
-                st.session_state["explore_path"] = f"{path}/{name}" if path else name
-                st.rerun()
+            child = f"{path}/{name}" if path else name
+            col_btn.button(f"📁 {name}", key=f"exp:{path}/{name}", use_container_width=True,
+                           on_click=_explore_goto, args=(child,))
             parts = [f"{total:,} file"]
             if local_b:
                 parts.append(f"💽 {human_size(local_b)}")
