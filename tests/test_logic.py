@@ -37,7 +37,7 @@ from services.gdrive import (  # noqa: E402
     _safe_name,
     build_tree,
 )
-from services.scanner import LocalFile, scan_local  # noqa: E402
+from services.scanner import LocalFile, disk_usage, scan_local  # noqa: E402
 from services.sync import (  # noqa: E402
     CONFLICT_FORCE,
     CONFLICT_NEWER,
@@ -134,6 +134,15 @@ def test_scan_local_excludes_and_paths():
         assert files["sub/b.bin"].size == 3
         assert files["a.txt"].relpath == "a.txt"
         assert errors == []
+
+
+def test_disk_usage_reports_filesystem():
+    with tempfile.TemporaryDirectory() as td:
+        usage = disk_usage(Path(td))
+        assert usage is not None
+        total, used, free = usage
+        assert total > 0 and used >= 0 and free >= 0
+    assert disk_usage(Path("/khong-ton-tai-xyz")) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +360,35 @@ def test_fetch_changes_and_apply():
     # Rebuild the tree from the patched items: only a2.txt and new.bin remain.
     files, _folders, _warn = build_tree(items, "R")
     assert set(files.keys()) == {"a2.txt", "new.bin"}
+
+
+def test_storage_quota_parsing():
+    class _FakeAbout:
+        def __init__(self, quota):
+            self._quota = quota
+
+        def get(self, fields):
+            return _FakeExec({"storageQuota": self._quota})
+
+    class _FakeQuotaService:
+        def __init__(self, quota):
+            self._about = _FakeAbout(quota)
+
+        def about(self):
+            return self._about
+
+    client = DriveClient.__new__(DriveClient)
+    client.service = _FakeQuotaService(
+        {"limit": "2199023255552", "usage": "170", "usageInDriveTrash": "20"}
+    )
+    q = client.storage_quota()
+    assert q["limit"] == 2199023255552
+    assert q["usage"] == 170 and q["usage_in_trash"] == 20
+
+    # No limit field -> unlimited plan.
+    client.service = _FakeQuotaService({"usage": "170"})
+    q = client.storage_quota()
+    assert q["limit"] is None and q["usage"] == 170
 
 
 def test_safe_join_blocks_escape():
