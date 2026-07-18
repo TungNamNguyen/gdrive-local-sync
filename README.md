@@ -58,12 +58,10 @@ opens its consent page and then redirects straight back to the app with the
 authorization code — nothing to copy or paste. The token is saved to
 `secrets/token.json` and refreshes automatically.
 
-Alternatives:
+Alternative:
 
 - `python scripts/authorize.py` — generates `secrets/token.json` on the host
   using your browser (useful before the first container start).
-- `./reconnect-drive.sh` — disconnects the current account and re-runs the
-  browser flow (`--disconnect` to only remove the token).
 
 The app is not Google-verified, so the consent page shows a warning; click
 **Advanced -> Go to app** to continue.
@@ -140,5 +138,5 @@ data/                # sync_history.db + drive_cache.json (gitignored)
   drive is mounted.
 - **`access_denied` during consent** -> add your email to *Test users* on the
   OAuth consent screen.
-- **Token expired / refresh error** -> sign out of Google in the sidebar (or
-  run `./reconnect-drive.sh`) and sign in again.
+- **Token expired / refresh error** -> sign out of Google in the sidebar and
+  sign in again.
