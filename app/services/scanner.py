@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import shutil
 import stat as stat_mod
 import threading
 from dataclasses import dataclass
@@ -22,6 +23,15 @@ class LocalFile:
     path: Path          # absolute path on disk
     size: int
     mtime: float        # unix timestamp
+
+
+def disk_usage(root: Path) -> Optional[tuple[int, int, int]]:
+    """(total, used, free) bytes of the filesystem holding `root`; None if unreadable."""
+    try:
+        usage = shutil.disk_usage(root)
+    except OSError:
+        return None
+    return usage.total, usage.used, usage.free
 
 
 def _matches_any(name: str, relpath: str, patterns: list[str]) -> bool:
