@@ -104,6 +104,7 @@ The app is not Google-verified, so the consent page shows a warning; click
 | -------------------- | ---------------- | -------------------------------------------------------------- |
 | `SEAGATE_MOUNT`      | *(required)*     | Host path of the Seagate drive, mounted at `/data/seagate`     |
 | `SEAGATE_PATH`       | `/data/seagate`  | Path the app scans (inside the container / in local dev)       |
+| `SEAGATE_SUBDIR`     | `googledrive`    | Subfolder preselected in the UI (changeable there; empty = whole drive) |
 | `APP_PASSWORD`       | *(empty)*        | UI login password (empty shows a warning)                      |
 | `DRIVE_ROOT_FOLDER`  | `root`           | Drive folder to compare against (`root` = entire My Drive)     |
 | `SYNC_WORKERS`       | `4`              | Parallel transfer workers during sync (1 = sequential)         |
