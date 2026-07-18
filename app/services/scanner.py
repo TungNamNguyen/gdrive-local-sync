@@ -34,6 +34,25 @@ def disk_usage(root: Path) -> Optional[tuple[int, int, int]]:
     return usage.total, usage.used, usage.free
 
 
+def resolve_subdir(root: Path, subdir: str) -> Optional[Path]:
+    """Join the user-typed `subdir` onto root; None if it would escape root.
+
+    Accepts "" (= root itself) and paths that do not exist yet — a download
+    target may be created later. Leading slashes are treated as relative so an
+    absolute-looking input still lands inside root.
+    """
+    cleaned = (subdir or "").strip().strip("/")
+    root = Path(root)
+    if not cleaned:
+        return root
+    dest = root.joinpath(*PurePosixPath(cleaned).parts)
+    try:
+        dest.resolve().relative_to(root.resolve())
+    except ValueError:
+        return None
+    return dest
+
+
 def _matches_any(name: str, relpath: str, patterns: list[str]) -> bool:
     """Case-insensitive match against the file name OR the relative path."""
     name_cf = name.casefold()
@@ -62,6 +81,11 @@ def scan_local(
     files: dict[str, LocalFile] = {}
     errors: list[str] = []
     total_bytes = 0
+
+    # A configured subfolder may not exist yet (it is created on the first
+    # download) — treat it as an empty local side, not as an error.
+    if not root.is_dir():
+        return files, errors
 
     def _onerror(err: OSError) -> None:
         errors.append(f"Không đọc được: {getattr(err, 'filename', err)} ({err.strerror or err})")
