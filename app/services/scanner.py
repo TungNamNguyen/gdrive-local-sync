@@ -19,10 +19,10 @@ from services.common import SyncCancelled
 
 @dataclass(frozen=True)
 class LocalFile:
-    relpath: str        # POSIX-style relative path, e.g. "Photos/2024/a.jpg"
-    path: Path          # absolute path on disk
+    relpath: str        
+    path: Path          
     size: int
-    mtime: float        # unix timestamp
+    mtime: float        
 
 
 def disk_usage(root: Path) -> Optional[tuple[int, int, int]]:
@@ -82,8 +82,6 @@ def scan_local(
     errors: list[str] = []
     total_bytes = 0
 
-    # A configured subfolder may not exist yet (it is created on the first
-    # download) — treat it as an empty local side, not as an error.
     if not root.is_dir():
         return files, errors
 
