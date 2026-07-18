@@ -12,8 +12,12 @@ hardened Docker Compose service.
   API), so it takes just a few seconds.
 - **Plan** the sync: upload / download / two-way, conflict policy, optional
   **mirror** mode (delete files that no longer exist on the source side).
+- **Google-native files** (Docs/Sheets/Slides) are skipped by default; an
+  optional one-way **export** saves `.docx`/`.xlsx`/`.pptx` copies to the
+  Seagate drive and refreshes them whenever the Drive version is newer.
 - **Background execution** with live progress: files, bytes, speed, ETA, a
-  Cancel button, and several files transferred in parallel.
+  Cancel button, and several files transferred in parallel. Dropped
+  connections mid-transfer are retried automatically with backoff.
 - **History** of every sync session stored in SQLite, exportable as CSV.
 - **Safety**: deletions are always recoverable (Drive -> Trash, Seagate ->
   `.sync_trash/`); nothing is ever hard-deleted.
@@ -75,7 +79,9 @@ The app is not Google-verified, so the consent page shows a warning; click
    get no comparison result and need to rescan.
 2. **Sync** — pick a direction and conflict policy -> *Lap ke hoach* to preview
    the plan -> *Bat dau dong bo*. **Mirror** mode requires typing `XOA` to
-   confirm the deletions.
+   confirm the deletions. The *Xuat file Google* checkbox (download directions
+   only) exports Docs/Sheets/Slides as Office copies on the Seagate side; the
+   copies are never uploaded back and the Drive originals are never touched.
 3. **History** — review past sessions, download CSV.
 
 > **Do not modify either side** while a sync is running.
@@ -99,7 +105,9 @@ The app is not Google-verified, so the consent page shows a warning; click
 - **Never hard-deletes**: Drive -> **Trash**; Seagate -> `.sync_trash/<timestamp>/`.
 - **Mirror** works only for one-way syncs and requires typing `XOA` to confirm.
 - `mtime` is preserved in both directions, so "newer wins" is trustworthy.
-- Google-native files (Docs/Sheets/Slides) have no size — always **skipped**.
+- Google-native files (Docs/Sheets/Slides) are never synced as-is — **skipped**
+  unless the optional export is enabled, which only writes Office copies on the
+  Seagate side (mirror mode never deletes those copies).
 
 ## Deployment security
 
