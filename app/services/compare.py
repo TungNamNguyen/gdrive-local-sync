@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from services.common import SyncCancelled
-from services.gdrive import RemoteFile
+from services.gdrive import RemoteFile, export_ext
 from services.scanner import LocalFile
 
 # Comparison statuses
@@ -45,13 +45,26 @@ class ComparisonItem:
     status: str
     local: Optional[LocalFile]
     remote: Optional[RemoteFile]
-    newer: Optional[str]  # "local" | "remote" | None (only meaningful when DIFFERENT)
+    # DIFFERENT: which side wins under "newer wins".
+    # GOOGLE_NATIVE: "remote" = the exported local copy is outdated.
+    newer: Optional[str]  # "local" | "remote" | None
+    # GOOGLE_NATIVE only: the exported local copy at "<relpath><ext>"
+    # (e.g. "report" -> "report.docx"), paired so it is never treated as
+    # LOCAL_ONLY (which would upload it or mirror-delete it).
+    export_local: Optional[LocalFile] = None
 
 
 def _newer_side(local: LocalFile, remote: RemoteFile) -> Optional[str]:
     if abs(local.mtime - remote.mtime) <= MTIME_TOLERANCE:
         return None
     return "local" if local.mtime > remote.mtime else "remote"
+
+
+def _export_newer(copy: Optional[LocalFile], remote: RemoteFile) -> Optional[str]:
+    """'remote' when the Drive doc changed after the local exported copy was made."""
+    if copy is None:
+        return None
+    return "remote" if remote.mtime - copy.mtime > MTIME_TOLERANCE else None
 
 
 def compare_maps(
@@ -78,6 +91,28 @@ def compare_maps(
             size = item.remote.size
         byte_totals[item.status] += size
 
+    # Google-native docs have no direct relpath counterpart, but they may have
+    # an EXPORTED local copy at "<relpath><ext>" (created by the export
+    # feature). Pair doc and copy up front: the copy leaves the local pool so
+    # it is never LOCAL_ONLY (no upload, no mirror-delete), and the plan can
+    # tell from `newer` whether it needs re-exporting.
+    local = dict(local)
+    exported: dict[str, LocalFile] = {}
+    for rel, rf in remote.items():
+        if cancel is not None and cancel.is_set():
+            raise SyncCancelled()
+        if not rf.is_google_native:
+            continue
+        ext = export_ext(rf.mime)
+        if ext is None:
+            continue
+        export_rel = rel + ext
+        if export_rel in remote:
+            continue  # a real Drive file owns that path -> compare it normally
+        copy = local.pop(export_rel, None)
+        if copy is not None:
+            exported[rel] = copy
+
     both = sorted(set(local) & set(remote))
     only_local = sorted(set(local) - set(remote))
     only_remote = sorted(set(remote) - set(local))
@@ -87,7 +122,8 @@ def compare_maps(
             raise SyncCancelled()
         lf, rf = local[rel], remote[rel]
         if rf.is_google_native:
-            _add(ComparisonItem(rel, GOOGLE_NATIVE, lf, rf, None))
+            copy = exported.get(rel)
+            _add(ComparisonItem(rel, GOOGLE_NATIVE, lf, rf, _export_newer(copy, rf), copy))
         elif rf.size is None or lf.size != rf.size:
             _add(ComparisonItem(rel, DIFFERENT, lf, rf, _newer_side(lf, rf)))
         else:
@@ -98,10 +134,14 @@ def compare_maps(
     for rel in only_remote:
         rf = remote[rel]
         # Google-native files (Docs/Sheets/...) can never exist on the Seagate
-        # side, so they must always be skipped — never planned for download and
-        # never mirror-trashed. Mark them GOOGLE_NATIVE even when Drive-only.
-        status = GOOGLE_NATIVE if rf.is_google_native else REMOTE_ONLY
-        _add(ComparisonItem(rel, status, None, rf, None))
+        # side as-is, so they are never planned for download and never
+        # mirror-trashed. Mark them GOOGLE_NATIVE even when Drive-only; the
+        # optional export op is the only thing that may act on them.
+        if rf.is_google_native:
+            copy = exported.get(rel)
+            _add(ComparisonItem(rel, GOOGLE_NATIVE, None, rf, _export_newer(copy, rf), copy))
+        else:
+            _add(ComparisonItem(rel, REMOTE_ONLY, None, rf, None))
 
     items.sort(key=lambda it: it.relpath.casefold())
     return items, counts, byte_totals
