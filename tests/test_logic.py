@@ -433,19 +433,20 @@ def test_folder_listing_groups_and_filters():
               mime="application/vnd.google-apps.document")),
     ]
 
-    # Root level: one subfolder "A" (2 files below, 1 differing) + 2 direct files.
+    # Root level: one subfolder "A" (2 files below, 1 differing; sizes
+    # aggregated per side: local 10+10, remote 99+10) + 2 direct files.
     subfolders, files = folder_listing(items, "")
-    assert subfolders == [("A", 2, 1)]
+    assert subfolders == [("A", 2, 1, 20, 109)]
     assert [it.relpath for it in files] == ["z.txt", "doc"]
 
     # only_diff drops identical/native files; "A" stays (has a difference).
     subfolders, files = folder_listing(items, "", only_diff=True)
-    assert subfolders == [("A", 2, 1)]
+    assert subfolders == [("A", 2, 1, 20, 109)]
     assert [it.relpath for it in files] == ["z.txt"]
 
     # Inside "A": subfolder "B" (all identical -> filtered out by only_diff).
     subfolders, files = folder_listing(items, "A")
-    assert subfolders == [("B", 1, 0)]
+    assert subfolders == [("B", 1, 0, 10, 10)]
     assert [it.relpath for it in files] == ["A/x.txt"]
     subfolders, _files = folder_listing(items, "A", only_diff=True)
     assert subfolders == []
