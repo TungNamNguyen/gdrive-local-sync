@@ -154,13 +154,14 @@ def folder_listing(
     items: list[ComparisonItem],
     prefix: str,
     only_diff: bool = False,
-) -> tuple[list[tuple[str, int, int]], list[ComparisonItem]]:
+) -> tuple[list[tuple[str, int, int, int, int]], list[ComparisonItem]]:
     """Entries directly under `prefix` ("" = root) — feeds the explorer tab.
 
-    Returns (subfolders, files): subfolders as sorted (name, total, diff)
-    tuples aggregating every item below them; files are the items sitting
-    directly in `prefix`. `only_diff` keeps only differing files and folders
-    containing at least one difference.
+    Returns (subfolders, files): subfolders as sorted
+    (name, total, diff, local_bytes, remote_bytes) tuples aggregating every
+    item below them; files are the items sitting directly in `prefix`.
+    `only_diff` keeps only differing files and folders containing at least
+    one difference.
     """
     base = f"{prefix}/" if prefix else ""
     folders: dict[str, list[int]] = {}
@@ -172,14 +173,20 @@ def folder_listing(
         is_diff = it.status in _DIFF_STATUSES
         if "/" in rest:
             name = rest.split("/", 1)[0]
-            agg = folders.setdefault(name, [0, 0])
+            agg = folders.setdefault(name, [0, 0, 0, 0])
             agg[0] += 1
             agg[1] += is_diff
+            lf = it.local or it.export_local
+            if lf is not None:
+                agg[2] += lf.size
+            if it.remote is not None and it.remote.size is not None:
+                agg[3] += it.remote.size
         elif not only_diff or is_diff:
             files.append(it)
     subfolders = [
-        (name, total, diff)
-        for name, (total, diff) in sorted(folders.items(), key=lambda kv: kv[0].casefold())
+        (name, total, diff, local_bytes, remote_bytes)
+        for name, (total, diff, local_bytes, remote_bytes)
+        in sorted(folders.items(), key=lambda kv: kv[0].casefold())
         if not only_diff or diff
     ]
     return subfolders, files
