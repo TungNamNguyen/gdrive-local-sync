@@ -1,14 +1,10 @@
 # Streamlit configuration for a self-hosted app (runs on localhost via Docker).
 
 [client]
-# Hide the top-right toolbar: the "Deploy" button (Streamlit Cloud) + dev menu.
-# This app is self-hosted so neither is needed. Use "viewer" instead to keep
-# the "..." menu (Settings/theme) while still hiding the Deploy button.
 toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
 
 [theme]
-# Accent color used for primary buttons, radio/checkbox marks, progress bars.
 primaryColor = "#2563EB"
