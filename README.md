@@ -19,6 +19,8 @@ hardened Docker Compose service.
   Cancel button, and several files transferred in parallel. Dropped
   connections mid-transfer are retried automatically with backoff.
 - **History** of every sync session stored in SQLite, exportable as CSV.
+- **Storage at a glance**: sidebar gauges show used/total space of both the
+  Seagate filesystem and the Google Drive quota.
 - **Safety**: deletions are always recoverable (Drive -> Trash, Seagate ->
   `.sync_trash/`); nothing is ever hard-deleted.
 
