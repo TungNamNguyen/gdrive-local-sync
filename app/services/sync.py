@@ -27,11 +27,12 @@ from services import history
 from services.common import SyncCancelled
 from services.compare import (
     DIFFERENT,
+    GOOGLE_NATIVE,
     LOCAL_ONLY,
     REMOTE_ONLY,
     ComparisonItem,
 )
-from services.gdrive import DriveClient, RemoteFile
+from services.gdrive import DriveClient, RemoteFile, export_ext
 from services.scanner import LocalFile
 from utils import human_size
 
@@ -56,6 +57,7 @@ OP_UPLOAD = "upload"                # create new on Drive
 OP_UPDATE_REMOTE = "update_remote"  # overwrite an existing Drive file
 OP_DOWNLOAD = "download"            # create new on the Seagate drive
 OP_UPDATE_LOCAL = "update_local"    # overwrite an existing Seagate file
+OP_EXPORT_LOCAL = "export_local"    # export a Google-native doc to an Office copy
 OP_TRASH_REMOTE = "trash_remote"    # mirror: move a Drive file to the Trash
 OP_DELETE_LOCAL = "delete_local"    # mirror: move a Seagate file into .sync_trash
 
@@ -64,11 +66,12 @@ OP_VI = {
     OP_UPDATE_REMOTE: "⬆️ Ghi đè trên Drive",
     OP_DOWNLOAD: "⬇️ Tải xuống (mới)",
     OP_UPDATE_LOCAL: "⬇️ Ghi đè trên Seagate",
+    OP_EXPORT_LOCAL: "📄 Xuất file Google",
     OP_TRASH_REMOTE: "🗑️ Vào Thùng rác Drive",
     OP_DELETE_LOCAL: "🗑️ Vào .sync_trash (Seagate)",
 }
 
-_TRANSFER_OPS = {OP_UPLOAD, OP_UPDATE_REMOTE, OP_DOWNLOAD, OP_UPDATE_LOCAL}
+_TRANSFER_OPS = {OP_UPLOAD, OP_UPDATE_REMOTE, OP_DOWNLOAD, OP_UPDATE_LOCAL, OP_EXPORT_LOCAL}
 
 
 @dataclass(frozen=True)
@@ -100,11 +103,16 @@ def build_plan(
     direction: str,
     conflict: str,
     mirror: bool,
+    export_native: bool = False,
 ) -> tuple[list[Action], int]:
     """Returns (actions, skipped_conflict_count). Order: transfers first, deletions last."""
     transfers: list[Action] = []
     deletions: list[Action] = []
     skipped_conflicts = 0
+    # Relpaths owned by real files on either side — an export copy must never
+    # land on one of these (e.g. Drive holds both the doc "report" AND a real
+    # file "report.docx").
+    taken = {it.relpath for it in items}
 
     for it in items:
         if it.status == LOCAL_ONLY:
@@ -150,7 +158,25 @@ def build_plan(
                     transfers.append(
                         Action(OP_UPDATE_LOCAL, it.relpath, it.remote.size or 0, it.local, it.remote)
                     )
-        # IDENTICAL & GOOGLE_NATIVE: nothing to do.
+
+        elif it.status == GOOGLE_NATIVE:
+            # Optional one-way export of Docs/Sheets/... to an Office copy on
+            # the Seagate side. Never uploads, never touches the Drive doc.
+            if not export_native or direction not in (DIR_DOWN, DIR_BOTH):
+                continue
+            assert it.remote is not None
+            ext = export_ext(it.remote.mime)
+            if ext is None:
+                continue  # Forms/Maps/... have no file counterpart
+            export_rel = it.relpath + ext
+            if export_rel in taken:
+                continue
+            if it.export_local is None or it.newer == "remote":
+                transfers.append(
+                    Action(OP_EXPORT_LOCAL, export_rel, it.remote.size or 0,
+                           it.export_local, it.remote)
+                )
+        # IDENTICAL: nothing to do.
 
     transfers.sort(key=lambda a: a.relpath.casefold())
     deletions.sort(key=lambda a: a.relpath.casefold())
@@ -435,6 +461,18 @@ class SyncRunner(threading.Thread):
             dest = _safe_join(self.seagate_root, action.relpath)
             client.download_file(
                 file_id=action.remote.id,
+                dest=dest,
+                mtime=action.remote.mtime,
+                progress_cb=_on_bytes,
+                cancel=p.cancel,
+            )
+
+        elif action.op == OP_EXPORT_LOCAL:
+            assert action.remote is not None
+            dest = _safe_join(self.seagate_root, action.relpath)
+            client.export_file(
+                file_id=action.remote.id,
+                mime=action.remote.mime,
                 dest=dest,
                 mtime=action.remote.mtime,
                 progress_cb=_on_bytes,
