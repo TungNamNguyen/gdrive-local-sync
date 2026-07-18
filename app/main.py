@@ -98,6 +98,11 @@ def _drive_root() -> str:
     return st.session_state.get("drive_root", config.DRIVE_ROOT_DEFAULT)
 
 
+def _drive_display() -> str:
+    root = _drive_root()
+    return "My Drive (toàn bộ)" if root == "root" else root
+
+
 def _local_root():
     """The configured local folder (SEAGATE_PATH + subfolder); None if invalid."""
     return resolve_subdir(config.SEAGATE_PATH, st.session_state.get("local_subdir", ""))
@@ -152,12 +157,17 @@ def _render_sidebar() -> object | None:
     if not seagate.is_dir():
         st.sidebar.error(f"Không thấy ổ Seagate tại `{seagate}` — kiểm tra kết nối/mount.")
 
-    drive_root = st.sidebar.text_input(
+    # Shown empty when the whole My Drive is the scope ("root" stays the
+    # internal value — resolve_folder_path understands it).
+    stored_root = _drive_root()
+    drive_input = st.sidebar.text_input(
         "Thư mục gốc trên Drive",
-        value=_drive_root(),
-        help="`root` = toàn bộ My Drive, hoặc ví dụ `Backup/Seagate`.",
+        value="" if stored_root == "root" else stored_root,
+        placeholder="(toàn bộ My Drive)",
+        help="Để trống = toàn bộ My Drive. Gõ ví dụ `Backup/Study` để chỉ "
+        "so sánh/đồng bộ thư mục đó trên Drive.",
     )
-    drive_root = (drive_root or "root").strip() or "root"
+    drive_root = (drive_input or "").strip().strip("/") or "root"
     if drive_root != st.session_state.get("drive_root"):
         st.session_state["drive_root"] = drive_root
         _abort_scan()  # a running scan would produce results for the old root
@@ -350,7 +360,7 @@ def render_compare_tab(creds) -> None:
     disabled = creds is None or not config.SEAGATE_PATH.is_dir() or _local_root() is None
     if creds is None:
         st.info("⬅️ Hãy kết nối Google Drive ở thanh bên trái trước.")
-    st.caption(f"Phạm vi: 💽 `{_local_display()}` ⇄ ☁️ Drive `{_drive_root()}`")
+    st.caption(f"Phạm vi: 💽 `{_local_display()}` ⇄ ☁️ `{_drive_display()}`")
 
     col_scan, col_full = st.columns([3, 2])
     if col_scan.button("🔍 Quét & So sánh", type="primary", disabled=disabled):
@@ -867,8 +877,9 @@ def render_guide_tab() -> None:
 > bấm **Advanced → Go to app** để tiếp tục (an toàn vì app do chính bạn tạo).
 
 ### 2. So sánh
-- Ở sidebar chọn phạm vi: **Thư mục gốc trên Drive** và **Thư mục trên Seagate**
-  (để trống = toàn bộ ổ; gõ ví dụ `Backup/Study` để chỉ đồng bộ thư mục đó).
+- Ở sidebar chọn phạm vi: **Thư mục gốc trên Drive** (để trống = toàn bộ My
+  Drive) và **Thư mục trên Seagate** (để trống = toàn bộ ổ). Gõ ví dụ
+  `Backup/Study` để chỉ đồng bộ thư mục đó.
 - Bấm **Quét & So sánh** để đối chiếu ổ Seagate với Google Drive theo đường dẫn
   (hai file cùng đường dẫn + cùng kích thước = giống nhau).
 - Sau khi quét xong, mở tab **🗂️ Khám phá** để duyệt cây thư mục hai bên: bấm
