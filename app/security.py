@@ -28,12 +28,12 @@ def require_login() -> None:
 
     if st.session_state.get("auth_ok"):
         with st.sidebar:
-            if st.button("🚪 Đăng xuất (thoát app)", use_container_width=True):
+            if st.button("🚪 Đăng xuất", use_container_width=True):
                 st.session_state["auth_ok"] = False
                 st.rerun()
         return
 
-    st.title("🔐 Seagate ⇄ Google Drive Sync")
+    st.title("🔐 Local ⇄ Google Drive Sync")
     with st.form("login_form"):
         entered = st.text_input("Mật khẩu", type="password")
         submitted = st.form_submit_button("Đăng nhập", type="primary")
