@@ -564,15 +564,19 @@ def render_explore_tab() -> None:
 
     if subfolders:
         st.caption(f"{len(subfolders):,} thư mục con")
-        for name, total, diff in subfolders[:200]:
-            col_btn, col_info = st.columns([5, 3])
+        for name, total, diff, local_b, remote_b in subfolders[:200]:
+            col_btn, col_info = st.columns([4, 4])
             if col_btn.button(f"📁 {name}", key=f"exp:{path}/{name}", use_container_width=True):
                 st.session_state["explore_path"] = f"{path}/{name}" if path else name
                 st.rerun()
-            note = f"{total:,} file"
+            parts = [f"{total:,} file"]
+            if local_b:
+                parts.append(f"💽 {human_size(local_b)}")
+            if remote_b:
+                parts.append(f"☁️ {human_size(remote_b)}")
             if diff:
-                note += f" · ⚠️ {diff:,} khác biệt"
-            col_info.caption(note)
+                parts.append(f"⚠️ {diff:,} khác biệt")
+            col_info.caption(" · ".join(parts))
         if len(subfolders) > 200:
             st.caption(f"… và {len(subfolders) - 200:,} thư mục nữa — bật lọc để thu hẹp.")
 
