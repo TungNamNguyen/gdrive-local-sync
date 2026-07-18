@@ -388,11 +388,13 @@ def _render_comparison_results() -> None:
     for it in items:
         if it.status not in chosen:
             continue
+        # For Google-native docs the Seagate column shows the exported copy.
+        lf = it.local or it.export_local
         rows.append(
             {
                 "Trạng thái": STATUS_VI[it.status],
                 "Đường dẫn": it.relpath,
-                "KT Seagate": human_size(it.local.size) if it.local else "",
+                "KT Seagate": human_size(lf.size) if lf else "",
                 "KT Drive": human_size(it.remote.size) if (it.remote and it.remote.size is not None) else "",
                 "Mới hơn": {"local": "Seagate", "remote": "Drive"}.get(it.newer or "", ""),
             }
@@ -462,9 +464,20 @@ def _render_plan_config() -> None:
             "`.sync_trash/` trên chính ổ đó. Không bao giờ xoá vĩnh viễn.",
         )
 
+    export_native = False
+    if direction in (DIR_DOWN, DIR_BOTH):
+        export_native = st.checkbox(
+            "📄 Xuất file Google (Docs/Sheets/Slides) về Seagate dạng .docx/.xlsx/.pptx",
+            value=False,
+            help="Chỉ một chiều Drive → Seagate: bản xuất được tạo mới hoặc cập nhật khi "
+            "tài liệu trên Drive mới hơn. Không bao giờ tải lên hay xoá tài liệu gốc "
+            "trên Drive; chế độ mirror cũng không đụng tới bản xuất.",
+        )
+
     if st.button("📋 Lập kế hoạch", type="primary"):
         actions, skipped = build_plan(
-            st.session_state["cmp_items"], direction, conflict, mirror
+            st.session_state["cmp_items"], direction, conflict, mirror,
+            export_native=export_native,
         )
         st.session_state["plan_actions"] = actions
         st.session_state["plan_skipped"] = skipped
@@ -472,6 +485,7 @@ def _render_plan_config() -> None:
             "direction": direction,
             "conflict": conflict,
             "mirror": mirror,
+            "export": export_native,
         }
 
 
@@ -519,7 +533,11 @@ def _render_plan_and_start(creds) -> None:
         can_start = confirm.strip() == "XOA"
 
     if st.button("🚀 Bắt đầu đồng bộ", type="primary", disabled=not can_start):
-        mode = meta["conflict"] + ("+mirror" if meta["mirror"] else "")
+        mode = (
+            meta["conflict"]
+            + ("+mirror" if meta["mirror"] else "")
+            + ("+export" if meta.get("export") else "")
+        )
         progress = ProgressState(len(actions), total_bytes, meta["direction"], mode)
         runner = SyncRunner(
             creds=creds,
@@ -674,6 +692,10 @@ def render_guide_tab() -> None:
   **Lập kế hoạch** để xem trước.
 - **Mirror** (chỉ cho một chiều) sẽ xoá file thừa ở bên đích — phải gõ `XOA`
   để xác nhận.
+- **📄 Xuất file Google** (khi hướng có chiều tải xuống): tạo bản sao `.docx` /
+  `.xlsx` / `.pptx` của Google Docs/Sheets/Slides trên Seagate, và cập nhật lại
+  khi tài liệu trên Drive mới hơn. Chỉ một chiều: bản xuất không bao giờ được
+  tải lên, và tài liệu gốc trên Drive không bị đụng tới.
 - Bấm **Bắt đầu đồng bộ** và theo dõi tiến độ trực tiếp; có thể **Huỷ** giữa chừng.
 
 ### An toàn dữ liệu
