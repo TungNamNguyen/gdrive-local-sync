@@ -93,7 +93,7 @@ class RemoteFile:
     id: str
     name: str
     relpath: str
-    size: Optional[int]      # None for Google-native files (Docs/Sheets/...)
+    size: Optional[int]      
     mtime: float
     mime: str
 
