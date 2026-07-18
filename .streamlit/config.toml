@@ -8,3 +8,7 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+# Accent color used for primary buttons, radio/checkbox marks, progress bars.
+primaryColor = "#2563EB"
