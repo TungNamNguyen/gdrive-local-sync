@@ -40,6 +40,7 @@ from services.scan import (
     ScanRunner,
     ScanState,
 )
+from services.scanner import disk_usage
 from services.sync import (
     CONFLICT_FORCE,
     CONFLICT_NEWER,
@@ -149,7 +150,10 @@ def _render_sidebar() -> object | None:
         _reset_comparison()
 
     st.sidebar.divider()
-    return _render_account(drive_root)
+    creds = _render_account(drive_root)
+    st.sidebar.divider()
+    _render_storage(creds)
+    return creds
 
 
 def _handle_oauth_callback() -> None:
@@ -165,6 +169,7 @@ def _handle_oauth_callback() -> None:
             creds = exchange_code(params["code"], config.OAUTH_REDIRECT_URI)
             st.session_state["creds"] = creds
             st.session_state.pop("remote_email", None)
+            st.session_state.pop("drive_quota", None)  # may belong to another account
         except Exception as exc:  # noqa: BLE001 — show the error instead of crashing
             st.session_state["oauth_error"] = f"Đăng nhập Google thất bại: {exc}"
         st.query_params.clear()
@@ -194,7 +199,7 @@ def _render_account(drive_root: str) -> object | None:
         if st.sidebar.button("🔌 Đăng xuất Google", use_container_width=True):
             delete_credentials()
             drive_cache.clear()  # the Drive cache belongs to the old account
-            for key in ("creds", "remote_email"):
+            for key in ("creds", "remote_email", "drive_quota"):
                 st.session_state.pop(key, None)
             _abort_scan()
             _reset_comparison()
@@ -217,6 +222,60 @@ def _render_account(drive_root: str) -> object | None:
     )
     st.sidebar.caption("Bấm nút trên → chọn tài khoản Google → tự quay lại đây.")
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Sidebar: storage usage
+# --------------------------------------------------------------------------- #
+_QUOTA_TTL = 600  # seconds — the Drive quota is an API call, refresh at most this often
+
+
+def _get_drive_quota(creds) -> dict | None:
+    """Session-cached Drive quota (the sidebar re-renders every poll tick)."""
+    cached = st.session_state.get("drive_quota")
+    if cached is not None and time.time() - cached["at"] < _QUOTA_TTL:
+        return cached["data"]
+    try:
+        data = DriveClient(creds).storage_quota()
+    except Exception:  # noqa: BLE001 — display only; also caches the failure
+        data = None
+    st.session_state["drive_quota"] = {"at": time.time(), "data": data}
+    return data
+
+
+def _render_storage(creds) -> None:
+    st.sidebar.subheader("💾 Dung lượng")
+
+    usage = disk_usage(config.SEAGATE_PATH)
+    if usage is not None:
+        total, used, free = usage
+        frac = used / total if total else 0.0
+        st.sidebar.progress(
+            min(frac, 1.0),
+            text=f"💽 Seagate — {human_size(used)} / {human_size(total)}",
+        )
+        st.sidebar.caption(f"Còn trống {human_size(free)}")
+    else:
+        st.sidebar.caption("💽 Seagate: chưa kết nối ổ.")
+
+    if creds is None:
+        return
+    quota = _get_drive_quota(creds)
+    if quota is None or quota.get("usage") is None:
+        st.sidebar.caption("☁️ Drive: không lấy được dung lượng.")
+        return
+    used, limit = quota["usage"], quota["limit"]
+    trash = quota.get("usage_in_trash") or 0
+    trash_note = f" · Thùng rác {human_size(trash)}" if trash else ""
+    if limit:
+        st.sidebar.progress(
+            min(used / limit, 1.0),
+            text=f"☁️ Drive — {human_size(used)} / {human_size(limit)}",
+        )
+        st.sidebar.caption(f"Còn trống {human_size(max(limit - used, 0))}{trash_note}")
+    else:
+        st.sidebar.progress(0.0, text=f"☁️ Drive — {human_size(used)}")
+        st.sidebar.caption(f"Dung lượng không giới hạn{trash_note}")
 
 
 # --------------------------------------------------------------------------- #
@@ -610,6 +669,7 @@ def _render_progress() -> None:
     if st.button("✅ Xong (quét lại để đồng bộ tiếp)"):
         st.session_state.pop("progress", None)
         st.session_state.pop("runner", None)
+        st.session_state.pop("drive_quota", None)  # transfers changed the usage
         _reset_comparison()
         st.rerun()
 
