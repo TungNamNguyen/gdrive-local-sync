@@ -155,6 +155,25 @@ def test_resolve_subdir_stays_inside():
     assert resolve_subdir(root, "../etc") is None
 
 
+def test_prefs_roundtrip():
+    from services import prefs
+
+    original = prefs.PREFS_FILE
+    with tempfile.TemporaryDirectory() as td:
+        prefs.PREFS_FILE = Path(td) / "ui_prefs.json"
+        try:
+            assert prefs.load() == {}
+            prefs.save(local_subdir="googledrive")
+            prefs.save(drive_root="Backup")  # merges, must not drop other keys
+            assert prefs.load() == {"local_subdir": "googledrive", "drive_root": "Backup"}
+            prefs.save(local_subdir="")  # an explicitly empty value must persist
+            assert prefs.load()["local_subdir"] == ""
+            prefs.PREFS_FILE.write_text("not json", encoding="utf-8")
+            assert prefs.load() == {}  # corrupt file -> behave as empty
+        finally:
+            prefs.PREFS_FILE = original
+
+
 def test_disk_usage_reports_filesystem():
     with tempfile.TemporaryDirectory() as td:
         usage = disk_usage(Path(td))
