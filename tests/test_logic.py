@@ -47,6 +47,7 @@ from services.sync import (  # noqa: E402
     DIR_UP,
     OP_DELETE_LOCAL,
     OP_DOWNLOAD,
+    OP_EXPORT_LOCAL,
     OP_TRASH_REMOTE,
     OP_UPDATE_LOCAL,
     OP_UPDATE_REMOTE,
@@ -77,8 +78,9 @@ def _remote(
     return RemoteFile(id="id-" + rel, name=rel, relpath=rel, size=size, mtime=mtime, mime=mime)
 
 
-def _item(rel, status, local=None, remote=None, newer=None) -> ComparisonItem:
-    return ComparisonItem(relpath=rel, status=status, local=local, remote=remote, newer=newer)
+def _item(rel, status, local=None, remote=None, newer=None, export_local=None) -> ComparisonItem:
+    return ComparisonItem(relpath=rel, status=status, local=local, remote=remote,
+                          newer=newer, export_local=export_local)
 
 
 # --------------------------------------------------------------------------- #
@@ -178,6 +180,48 @@ def test_compare_remote_only_native_is_skipped():
     by_rel = {it.relpath: it.status for it in items}
     assert by_rel["doc"] == GOOGLE_NATIVE
     assert by_rel["file.bin"] == REMOTE_ONLY
+
+
+def test_compare_pairs_native_export_copy():
+    # A Google doc "report" with an exported local copy "report.docx": the
+    # copy is paired to the doc (not LOCAL_ONLY -> never uploaded or
+    # mirror-deleted) and `newer` tells whether it needs re-exporting.
+    remote = {
+        "report": _remote("report", size=None, mtime=1000.0,
+                          mime="application/vnd.google-apps.document"),
+    }
+    local = {"report.docx": _local("report.docx", size=50, mtime=1000.0)}
+    items, counts, _bytes = compare_maps(local, remote)
+    assert len(items) == 1, items
+    it = items[0]
+    assert it.status == GOOGLE_NATIVE
+    assert it.export_local is not None and it.export_local.relpath == "report.docx"
+    assert it.newer is None  # same mtime -> copy is fresh
+    assert counts[LOCAL_ONLY] == 0
+
+    # Doc edited later on Drive -> the copy is outdated.
+    remote_newer = {
+        "report": _remote("report", size=None, mtime=5000.0,
+                          mime="application/vnd.google-apps.document"),
+    }
+    items2, _c, _b = compare_maps(local, remote_newer)
+    assert items2[0].newer == "remote"
+
+
+def test_compare_export_copy_yields_to_real_remote_file():
+    # Drive holds BOTH the doc "report" and a real file "report.docx": the
+    # local file must compare against the real file, not pair with the doc.
+    remote = {
+        "report": _remote("report", size=None,
+                          mime="application/vnd.google-apps.document"),
+        "report.docx": _remote("report.docx", size=50),
+    }
+    local = {"report.docx": _local("report.docx", size=50)}
+    items, _c, _b = compare_maps(local, remote)
+    by_rel = {it.relpath: it for it in items}
+    assert by_rel["report.docx"].status == IDENTICAL
+    assert by_rel["report"].status == GOOGLE_NATIVE
+    assert by_rel["report"].export_local is None
 
 
 def test_safe_name_neutralizes_traversal():
@@ -404,6 +448,81 @@ def test_plan_both_skip_policy():
     ]
     actions, skipped = build_plan(items, DIR_BOTH, CONFLICT_SKIP, mirror=False)
     assert actions == [] and skipped == 1
+
+
+def test_plan_export_native():
+    doc = _remote("doc", size=7, mtime=2000.0,
+                  mime="application/vnd.google-apps.document")
+    no_copy = _item("doc", GOOGLE_NATIVE, remote=doc)
+
+    # Checkbox off -> natives stay skipped.
+    actions, _ = build_plan([no_copy], DIR_DOWN, CONFLICT_NEWER, mirror=False)
+    assert actions == []
+
+    # On + a download direction -> export planned at "<rel>.docx".
+    actions, _ = build_plan([no_copy], DIR_DOWN, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert [(a.op, a.relpath) for a in actions] == [(OP_EXPORT_LOCAL, "doc.docx")]
+
+    # Upload direction never exports.
+    actions, _ = build_plan([no_copy], DIR_UP, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert actions == []
+
+    # Fresh copy -> nothing to do; outdated copy -> re-export.
+    copy = _local("doc.docx", size=50, mtime=2000.0)
+    fresh = _item("doc", GOOGLE_NATIVE, remote=doc, export_local=copy)
+    actions, _ = build_plan([fresh], DIR_DOWN, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert actions == []
+    outdated = _item("doc", GOOGLE_NATIVE, remote=doc, export_local=copy, newer="remote")
+    actions, _ = build_plan([outdated], DIR_BOTH, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert [a.op for a in actions] == [OP_EXPORT_LOCAL]
+
+    # A real file already owns "doc.docx" -> the export stands down.
+    real = _item("doc.docx", IDENTICAL, local=_local("doc.docx"),
+                 remote=_remote("doc.docx"))
+    actions, _ = build_plan([no_copy, real], DIR_DOWN, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert actions == []
+
+    # Non-exportable native types (Forms, ...) stay skipped.
+    form = _item("form", GOOGLE_NATIVE,
+                 remote=_remote("form", size=None, mime="application/vnd.google-apps.form"))
+    actions, _ = build_plan([form], DIR_DOWN, CONFLICT_NEWER, mirror=False,
+                            export_native=True)
+    assert actions == []
+
+
+# --------------------------------------------------------------------------- #
+# network retry (IncompleteRead and friends during transfers)
+# --------------------------------------------------------------------------- #
+def test_with_net_retry_recovers_and_gives_up():
+    import http.client
+
+    from services.gdrive import _with_net_retry
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http.client.IncompleteRead(b"partial")
+        return "ok"
+
+    assert _with_net_retry(flaky, base_delay=0.0) == "ok"
+    assert calls["n"] == 3
+
+    def always_broken():
+        raise ConnectionResetError("network down")
+
+    try:
+        _with_net_retry(always_broken, attempts=2, base_delay=0.0)
+    except ConnectionResetError:
+        pass
+    else:
+        raise AssertionError("expected ConnectionResetError once retries ran out")
 
 
 # --------------------------------------------------------------------------- #
