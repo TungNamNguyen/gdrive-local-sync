@@ -21,7 +21,7 @@ import streamlit as st
 import config
 import security
 from services import history
-from services.compare import ALL_STATUSES, STATUS_VI
+from services.compare import ALL_STATUSES, STATUS_VI, folder_listing
 from services.gdrive import (
     CREDENTIALS_FILE,
     DriveClient,
@@ -40,7 +40,7 @@ from services.scan import (
     ScanRunner,
     ScanState,
 )
-from services.scanner import disk_usage
+from services.scanner import disk_usage, resolve_subdir
 from services.sync import (
     CONFLICT_FORCE,
     CONFLICT_NEWER,
@@ -50,7 +50,10 @@ from services.sync import (
     DIR_UP,
     DIRECTION_VI,
     OP_DELETE_LOCAL,
+    OP_DOWNLOAD,
+    OP_EXPORT_LOCAL,
     OP_TRASH_REMOTE,
+    OP_UPDATE_LOCAL,
     OP_VI,
     ProgressState,
     SyncRunner,
@@ -72,7 +75,7 @@ CONFLICT_VI = {
 # --------------------------------------------------------------------------- #
 def _init_app() -> None:
     st.set_page_config(
-        page_title="Seagate ⇄ Google Drive Sync",
+        page_title="Local ⇄ Google Drive Sync",
         page_icon="🔄",
         layout="wide",
     )
@@ -95,6 +98,16 @@ def _drive_root() -> str:
     return st.session_state.get("drive_root", config.DRIVE_ROOT_DEFAULT)
 
 
+def _local_root():
+    """The configured local folder (SEAGATE_PATH + subfolder); None if invalid."""
+    return resolve_subdir(config.SEAGATE_PATH, st.session_state.get("local_subdir", ""))
+
+
+def _local_display() -> str:
+    sub = st.session_state.get("local_subdir", "")
+    return f"Seagate/{sub}" if sub else "Seagate (toàn bộ ổ)"
+
+
 def _reset_comparison() -> None:
     """Drop stale scan/compare/plan results (called when the source config changes)."""
     for key in (
@@ -109,6 +122,7 @@ def _reset_comparison() -> None:
         "plan_actions",
         "plan_skipped",
         "plan_meta",
+        "explore_path",
     ):
         st.session_state.pop(key, None)
 
@@ -130,7 +144,7 @@ def _abort_scan() -> None:
 # Sidebar: configuration + Google account
 # --------------------------------------------------------------------------- #
 def _render_sidebar() -> object | None:
-    st.sidebar.title("🔄 Seagate ⇄ Drive")
+    st.sidebar.title("🔄 Local ⇄ Drive")
 
     st.sidebar.subheader("Cấu hình")
     # The Seagate path comes from .env; no need to display it — only warn when missing.
@@ -148,6 +162,24 @@ def _render_sidebar() -> object | None:
         st.session_state["drive_root"] = drive_root
         _abort_scan()  # a running scan would produce results for the old root
         _reset_comparison()
+
+    local_sub = st.sidebar.text_input(
+        "Thư mục trên Seagate",
+        value=st.session_state.get("local_subdir", ""),
+        placeholder="(toàn bộ ổ)",
+        help="Thư mục con trong ổ Seagate để so sánh/đồng bộ, ví dụ `Backup/Study`. "
+        "Để trống = toàn bộ ổ. Luôn phải nằm trong ổ Seagate.",
+    )
+    local_sub = (local_sub or "").strip().strip("/")
+    if local_sub != st.session_state.get("local_subdir", ""):
+        st.session_state["local_subdir"] = local_sub
+        _abort_scan()
+        _reset_comparison()
+    local_root = _local_root()
+    if local_root is None:
+        st.sidebar.error("Đường dẫn không hợp lệ — phải nằm bên trong ổ Seagate.")
+    elif local_sub and not local_root.is_dir():
+        st.sidebar.caption("📁 Thư mục chưa tồn tại — sẽ được tạo khi tải xuống.")
 
     st.sidebar.divider()
     creds = _render_account(drive_root)
@@ -315,9 +347,10 @@ def render_compare_tab(creds) -> None:
             height=180,
         )
 
-    disabled = creds is None or not config.SEAGATE_PATH.is_dir()
+    disabled = creds is None or not config.SEAGATE_PATH.is_dir() or _local_root() is None
     if creds is None:
         st.info("⬅️ Hãy kết nối Google Drive ở thanh bên trái trước.")
+    st.caption(f"Phạm vi: 💽 `{_local_display()}` ⇄ ☁️ Drive `{_drive_root()}`")
 
     col_scan, col_full = st.columns([3, 2])
     if col_scan.button("🔍 Quét & So sánh", type="primary", disabled=disabled):
@@ -342,11 +375,14 @@ def _start_scan(creds, force_full: bool) -> None:
     The background thread is what makes the Stop button clickable: scanning
     inline in this script run would block Streamlit until the scan finished.
     """
+    local_root = _local_root()
+    if local_root is None:
+        return
     _reset_comparison()  # old results are stale the moment a rescan starts
     state = ScanState()
     runner = ScanRunner(
         creds=creds,
-        seagate_root=config.SEAGATE_PATH,
+        seagate_root=local_root,
         exclude_patterns=_current_excludes(),
         drive_root_path=_drive_root(),
         state=state,
@@ -471,7 +507,83 @@ def _render_comparison_results() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 2 — Sync
+# Tab 2 — Explorer (browse the merged tree of both sides)
+# --------------------------------------------------------------------------- #
+def render_explore_tab() -> None:
+    st.header("Khám phá cây thư mục")
+
+    if "cmp_items" not in st.session_state:
+        st.info("Hãy chạy **Quét & So sánh** ở tab bên trái trước, rồi vào đây để "
+                "duyệt cây thư mục của cả hai bên.")
+        return
+    items = st.session_state["cmp_items"]
+
+    # Navigation: home / up / current location.
+    path = st.session_state.get("explore_path", "")
+    c_home, c_up, c_where = st.columns([1, 1, 5])
+    if c_home.button("🏠 Gốc", disabled=not path, use_container_width=True):
+        st.session_state["explore_path"] = ""
+        st.rerun()
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    if c_up.button("⬆️ Lên", disabled=not path, use_container_width=True):
+        st.session_state["explore_path"] = parent
+        st.rerun()
+    c_where.markdown(f"📁 **/{path}**" if path else "📁 **/** *(gốc)*")
+
+    c_diff, c_side = st.columns([2, 3])
+    only_diff = c_diff.checkbox("Chỉ hiện khác biệt", value=False)
+    side = c_side.radio(
+        "Phía",
+        options=["all", "local", "remote"],
+        format_func=lambda s: {
+            "all": "Cả hai bên", "local": "💽 Có trên Seagate", "remote": "☁️ Có trên Drive",
+        }[s],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if side == "local":
+        items = [it for it in items if it.local is not None or it.export_local is not None]
+    elif side == "remote":
+        items = [it for it in items if it.remote is not None]
+
+    subfolders, files = folder_listing(items, path, only_diff=only_diff)
+
+    if subfolders:
+        st.caption(f"{len(subfolders):,} thư mục con")
+        for name, total, diff in subfolders[:200]:
+            col_btn, col_info = st.columns([5, 3])
+            if col_btn.button(f"📁 {name}", key=f"exp:{path}/{name}", use_container_width=True):
+                st.session_state["explore_path"] = f"{path}/{name}" if path else name
+                st.rerun()
+            note = f"{total:,} file"
+            if diff:
+                note += f" · ⚠️ {diff:,} khác biệt"
+            col_info.caption(note)
+        if len(subfolders) > 200:
+            st.caption(f"… và {len(subfolders) - 200:,} thư mục nữa — bật lọc để thu hẹp.")
+
+    if files:
+        rows = []
+        for it in files:
+            lf = it.local or it.export_local
+            rows.append(
+                {
+                    "Trạng thái": STATUS_VI[it.status],
+                    "Tên file": it.relpath.rsplit("/", 1)[-1],
+                    "KT Seagate": human_size(lf.size) if lf else "",
+                    "KT Drive": human_size(it.remote.size) if (it.remote and it.remote.size is not None) else "",
+                    "Mới hơn": {"local": "Seagate", "remote": "Drive"}.get(it.newer or "", ""),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                     height=min(70 + 35 * len(rows), 420))
+        st.caption(f"{len(files):,} file trong thư mục này.")
+    elif not subfolders:
+        st.info("Thư mục trống (theo bộ lọc hiện tại).")
+
+
+# --------------------------------------------------------------------------- #
+# Tab 3 — Sync
 # --------------------------------------------------------------------------- #
 def render_sync_tab(creds) -> None:
     st.header("Đồng bộ")
@@ -497,9 +609,10 @@ def render_sync_tab(creds) -> None:
 def _render_plan_config() -> None:
     col1, col2 = st.columns(2)
     with col1:
+        # DIR_DOWN first: downloading Drive -> Seagate is the primary use case.
         direction = st.radio(
             "Hướng đồng bộ",
-            options=[DIR_UP, DIR_DOWN, DIR_BOTH],
+            options=[DIR_DOWN, DIR_UP, DIR_BOTH],
             format_func=lambda d: DIRECTION_VI[d],
         )
     with col2:
@@ -570,6 +683,17 @@ def _render_plan_and_start(creds) -> None:
         op_counts[a.op] = op_counts.get(a.op, 0) + 1
     st.write(" · ".join(f"{OP_VI[op]}: **{n}**" for op, n in op_counts.items()))
 
+    # Free-space guard: warn before starting a download bigger than the drive.
+    incoming = sum(
+        a.size for a in actions if a.op in (OP_DOWNLOAD, OP_UPDATE_LOCAL, OP_EXPORT_LOCAL)
+    )
+    usage = disk_usage(config.SEAGATE_PATH)
+    if usage is not None and incoming > usage[2]:
+        st.warning(
+            f"⚠️ Kế hoạch cần tải về {human_size(incoming)} nhưng ổ Seagate chỉ còn "
+            f"trống {human_size(usage[2])} — hãy dọn bớt dung lượng trước khi chạy."
+        )
+
     with st.expander("Xem chi tiết kế hoạch", expanded=False):
         df = pd.DataFrame(
             {
@@ -592,6 +716,10 @@ def _render_plan_and_start(creds) -> None:
         can_start = confirm.strip() == "XOA"
 
     if st.button("🚀 Bắt đầu đồng bộ", type="primary", disabled=not can_start):
+        local_root = _local_root()
+        if local_root is None:
+            st.error("Thư mục trên Seagate không hợp lệ — kiểm tra lại cấu hình.")
+            return
         mode = (
             meta["conflict"]
             + ("+mirror" if meta["mirror"] else "")
@@ -600,7 +728,7 @@ def _render_plan_and_start(creds) -> None:
         progress = ProgressState(len(actions), total_bytes, meta["direction"], mode)
         runner = SyncRunner(
             creds=creds,
-            seagate_root=config.SEAGATE_PATH,
+            seagate_root=local_root,
             drive_root_path=_drive_root(),
             actions=actions,
             remote_folders=st.session_state.get("remote_folders"),
@@ -675,7 +803,7 @@ def _render_progress() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 3 — History
+# Tab 4 — History
 # --------------------------------------------------------------------------- #
 _STATUS_LABEL = {
     "success": "✅ Thành công",
@@ -722,7 +850,7 @@ def render_history_tab() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 4 — Guide
+# Tab 5 — Guide
 # --------------------------------------------------------------------------- #
 def render_guide_tab() -> None:
     st.header("Hướng dẫn sử dụng")
@@ -739,8 +867,12 @@ def render_guide_tab() -> None:
 > bấm **Advanced → Go to app** để tiếp tục (an toàn vì app do chính bạn tạo).
 
 ### 2. So sánh
+- Ở sidebar chọn phạm vi: **Thư mục gốc trên Drive** và **Thư mục trên Seagate**
+  (để trống = toàn bộ ổ; gõ ví dụ `Backup/Study` để chỉ đồng bộ thư mục đó).
 - Bấm **Quét & So sánh** để đối chiếu ổ Seagate với Google Drive theo đường dẫn
   (hai file cùng đường dẫn + cùng kích thước = giống nhau).
+- Sau khi quét xong, mở tab **🗂️ Khám phá** để duyệt cây thư mục hai bên: bấm
+  vào thư mục để đi sâu, lọc "chỉ hiện khác biệt" hoặc theo từng phía.
 - Từ lần quét thứ hai, phía Drive chỉ hỏi **những gì thay đổi** nên rất nhanh (⚡).
   Nếu nghi kết quả bị lệch, bấm **🔄 Quét lại toàn bộ**.
 - Đang quét muốn ngừng thì bấm **⛔ Dừng quét**. Quét chỉ **đọc**, nên dừng giữa
@@ -778,11 +910,13 @@ def main() -> None:
 
     creds = _render_sidebar()
 
-    tab_compare, tab_sync, tab_history, tab_guide = st.tabs(
-        ["🔍 So sánh", "🔄 Đồng bộ", "📜 Lịch sử", "📖 Hướng dẫn"]
+    tab_compare, tab_explore, tab_sync, tab_history, tab_guide = st.tabs(
+        ["🔍 So sánh", "🗂️ Khám phá", "🔄 Đồng bộ", "📜 Lịch sử", "📖 Hướng dẫn"]
     )
     with tab_compare:
         render_compare_tab(creds)
+    with tab_explore:
+        render_explore_tab()
     with tab_sync:
         render_sync_tab(creds)
     with tab_history:
