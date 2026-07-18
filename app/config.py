@@ -30,6 +30,10 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 #   "Backup/Seagate" -> a subfolder (created automatically on upload if missing)
 DRIVE_ROOT_DEFAULT = os.getenv("DRIVE_ROOT_FOLDER", "root").strip() or "root"
 
+# Subfolder inside the mount preselected in the "Thư mục trên Seagate" box.
+# The user can still change or clear it in the UI (empty = the whole drive).
+LOCAL_SUBDIR_DEFAULT = os.getenv("SEAGATE_SUBDIR", "googledrive").strip().strip("/")
+
 # --- Security -------------------------------------------------------------------
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
