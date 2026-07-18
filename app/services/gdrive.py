@@ -8,17 +8,22 @@ Contains:
 - Full flat listing + in-memory tree building -> {relpath -> RemoteFile},
   plus incremental listing via the Changes API.
 - Resumable uploads (mtime preserved through modifiedTime), chunked downloads
-  to a .syncpart file followed by an atomic rename, and moving files to the
-  Drive Trash.
+  to a .syncpart file followed by an atomic rename, exports of Google-native
+  files to Office formats (files.export), and moving files to the Drive Trash.
+- Transfers retry transient connection drops (e.g. IncompleteRead) that the
+  Google client's own num_retries does not cover.
 """
 from __future__ import annotations
 
+import http.client
 import os
+import ssl
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
 
 # The loopback redirect uses http (not https) — valid per the OAuth spec for
 # "installed apps", but oauthlib rejects http by default. These two variables
@@ -27,6 +32,7 @@ from typing import Callable, Optional
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
+import httplib2  # noqa: E402
 from google.auth.transport.requests import Request  # noqa: E402
 from google.oauth2.credentials import Credentials  # noqa: E402
 from google_auth_oauthlib.flow import Flow  # noqa: E402
@@ -46,6 +52,31 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps"
 REDIRECT_URI = "http://localhost:8090/"
+
+# Export formats for Google-native files: source mime -> (export mime, local
+# extension). Only these types have a useful file counterpart; the remaining
+# native types (Forms, Maps, ...) cannot be exported and stay skipped.
+EXPORT_FORMATS: dict[str, tuple[str, str]] = {
+    "application/vnd.google-apps.document": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".docx",
+    ),
+    "application/vnd.google-apps.spreadsheet": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsx",
+    ),
+    "application/vnd.google-apps.presentation": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    ),
+    "application/vnd.google-apps.drawing": ("image/png", ".png"),
+}
+
+
+def export_ext(mime: str) -> Optional[str]:
+    """Local extension a Google-native mime exports to (None = not exportable)."""
+    fmt = EXPORT_FORMATS.get(mime)
+    return fmt[1] if fmt else None
 
 # Metadata fields shared by files.list and changes.list — the cache in
 # drive_cache.py stores exactly these fields; changing them requires clearing
@@ -102,6 +133,51 @@ def _safe_name(name: str) -> str:
     if name in (".", ".."):
         name = name.replace(".", "_")  # "." -> "_", ".." -> "__"
     return name
+
+
+# --------------------------------------------------------------------------- #
+# Network retry
+# --------------------------------------------------------------------------- #
+# Transient failures the Google client does NOT retry by itself: its
+# num_retries only re-sends on HTTP 5xx/429 and a few socket errors, while
+# e.g. http.client.IncompleteRead (connection dropped mid-chunk) bubbles up
+# and would fail the whole transfer.
+_TRANSIENT_NET_ERRORS = (
+    http.client.HTTPException,  # IncompleteRead, RemoteDisconnected, ...
+    ConnectionError,
+    TimeoutError,
+    ssl.SSLError,
+    httplib2.HttpLib2Error,
+)
+
+_T = TypeVar("_T")
+
+
+def _with_net_retry(
+    fn: Callable[[], _T],
+    cancel: Optional[threading.Event] = None,
+    attempts: int = 5,
+    base_delay: float = 1.0,
+) -> _T:
+    """Run fn() again after a transient network error (exponential backoff).
+
+    Safe for chunked transfers: both MediaIoBaseDownload and resumable uploads
+    only advance their internal offset after a chunk fully succeeds, so a
+    retried call re-requests the same byte range.
+    """
+    for attempt in range(attempts + 1):
+        try:
+            return fn()
+        except _TRANSIENT_NET_ERRORS:
+            if attempt >= attempts:
+                raise
+            delay = min(base_delay * (2 ** attempt), 16.0)
+            if cancel is not None:
+                if cancel.wait(delay):
+                    raise SyncCancelled()
+            elif delay > 0:
+                time.sleep(delay)
+    raise AssertionError("unreachable")  # for the type checker
 
 
 def build_tree(
@@ -448,11 +524,13 @@ class DriveClient:
             while response is None:
                 if cancel is not None and cancel.is_set():
                     raise SyncCancelled()
-                status, response = request.next_chunk(num_retries=5)
+                status, response = _with_net_retry(
+                    lambda: request.next_chunk(num_retries=5), cancel
+                )
                 if status is not None and progress_cb is not None:
                     progress_cb(status.resumable_progress)
         else:
-            response = request.execute(num_retries=5)
+            response = _with_net_retry(lambda: request.execute(num_retries=5), cancel)
         if progress_cb is not None:
             progress_cb(size)
         return response["id"]
@@ -466,9 +544,39 @@ class DriveClient:
         cancel: Optional[threading.Event] = None,
     ) -> None:
         """Download to a .syncpart file first, rename when done — never leaves a half file."""
+        request = self.service.files().get_media(fileId=file_id)
+        self._run_media_download(request, dest, mtime, progress_cb, cancel)
+
+    def export_file(
+        self,
+        file_id: str,
+        mime: str,
+        dest: Path,
+        mtime: float,
+        progress_cb: Optional[Callable[[int], None]] = None,
+        cancel: Optional[threading.Event] = None,
+    ) -> None:
+        """Export a Google-native file (Docs/Sheets/...) to its Office/PNG copy.
+
+        One-way only: the exported bytes are generated by Drive on the fly
+        (size unknown upfront, max ~10 MB per Drive's export limit). mtime is
+        set to the doc's modifiedTime so compare can tell when the local copy
+        is outdated.
+        """
+        export_mime = EXPORT_FORMATS[mime][0]
+        request = self.service.files().export_media(fileId=file_id, mimeType=export_mime)
+        self._run_media_download(request, dest, mtime, progress_cb, cancel)
+
+    def _run_media_download(
+        self,
+        request,
+        dest: Path,
+        mtime: float,
+        progress_cb: Optional[Callable[[int], None]],
+        cancel: Optional[threading.Event],
+    ) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path(str(dest) + ".syncpart")
-        request = self.service.files().get_media(fileId=file_id)
         try:
             with open(tmp, "wb") as fh:
                 downloader = MediaIoBaseDownload(fh, request, chunksize=DOWNLOAD_CHUNK)
@@ -476,7 +584,9 @@ class DriveClient:
                 while not done:
                     if cancel is not None and cancel.is_set():
                         raise SyncCancelled()
-                    status, done = downloader.next_chunk(num_retries=5)
+                    status, done = _with_net_retry(
+                        lambda: downloader.next_chunk(num_retries=5), cancel
+                    )
                     if status is not None and progress_cb is not None:
                         progress_cb(status.resumable_progress)
         except BaseException:
