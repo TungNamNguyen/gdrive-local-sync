@@ -30,7 +30,7 @@ from services.gdrive import (
     exchange_code,
     load_saved_credentials,
 )
-from services import drive_cache
+from services import drive_cache, prefs
 from services.scan import (
     DRIVE_INCREMENTAL,
     PHASE_COMPARE,
@@ -94,6 +94,23 @@ def _get_creds():
     return creds
 
 
+def _seed_scope_from_prefs() -> None:
+    """Once per browser session: restore the saved scope so F5 keeps choices.
+
+    session_state is wiped on every page reload; without this the scope boxes
+    would silently revert to their env defaults.
+    """
+    if "local_subdir" in st.session_state and "drive_root" in st.session_state:
+        return
+    saved = prefs.load()
+    st.session_state.setdefault(
+        "local_subdir", saved.get("local_subdir", config.LOCAL_SUBDIR_DEFAULT)
+    )
+    st.session_state.setdefault(
+        "drive_root", saved.get("drive_root", config.DRIVE_ROOT_DEFAULT)
+    )
+
+
 def _drive_root() -> str:
     return st.session_state.get("drive_root", config.DRIVE_ROOT_DEFAULT)
 
@@ -153,6 +170,7 @@ def _abort_scan() -> None:
 # Sidebar: configuration + Google account
 # --------------------------------------------------------------------------- #
 def _render_sidebar() -> object | None:
+    _seed_scope_from_prefs()
     st.sidebar.title("🔄 Local ⇄ Drive")
 
     st.sidebar.subheader("Cấu hình")
@@ -174,6 +192,7 @@ def _render_sidebar() -> object | None:
     drive_root = (drive_input or "").strip().strip("/") or "root"
     if drive_root != st.session_state.get("drive_root"):
         st.session_state["drive_root"] = drive_root
+        prefs.save(drive_root=drive_root)
         _abort_scan()  # a running scan would produce results for the old root
         _reset_comparison()
 
@@ -187,6 +206,7 @@ def _render_sidebar() -> object | None:
     local_sub = (local_sub or "").strip().strip("/")
     if local_sub != _local_subdir():
         st.session_state["local_subdir"] = local_sub
+        prefs.save(local_subdir=local_sub)
         _abort_scan()
         _reset_comparison()
     local_root = _local_root()
