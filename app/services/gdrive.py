@@ -329,6 +329,25 @@ class DriveClient:
         user = about.get("user", {})
         return user.get("emailAddress") or user.get("displayName") or "(không rõ)"
 
+    def storage_quota(self) -> dict[str, Optional[int]]:
+        """Drive storage quota in bytes: usage, limit (None = unlimited), trash usage."""
+        about = (
+            self.service.about()
+            .get(fields="storageQuota(limit,usage,usageInDriveTrash)")
+            .execute(num_retries=3)
+        )
+        quota = about.get("storageQuota", {})
+
+        def _to_int(key: str) -> Optional[int]:
+            value = quota.get(key)
+            return int(value) if value is not None else None
+
+        return {
+            "usage": _to_int("usage"),
+            "limit": _to_int("limit"),
+            "usage_in_trash": _to_int("usageInDriveTrash"),
+        }
+
     # ---- Folders ----
     def resolve_folder_path(self, path: str, create: bool = False) -> str:
         """'root' or 'A/B/C' -> folder id. create=True: create missing levels."""
