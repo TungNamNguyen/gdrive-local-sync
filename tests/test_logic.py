@@ -28,6 +28,7 @@ from services.compare import (  # noqa: E402
     LOCAL_ONLY,
     REMOTE_ONLY,
     compare_maps,
+    folder_listing,
 )
 from services import drive_cache  # noqa: E402
 from services.gdrive import (  # noqa: E402
@@ -37,7 +38,7 @@ from services.gdrive import (  # noqa: E402
     _safe_name,
     build_tree,
 )
-from services.scanner import LocalFile, disk_usage, scan_local  # noqa: E402
+from services.scanner import LocalFile, disk_usage, resolve_subdir, scan_local  # noqa: E402
 from services.sync import (  # noqa: E402
     CONFLICT_FORCE,
     CONFLICT_NEWER,
@@ -134,6 +135,24 @@ def test_scan_local_excludes_and_paths():
         assert files["sub/b.bin"].size == 3
         assert files["a.txt"].relpath == "a.txt"
         assert errors == []
+
+
+def test_scan_local_missing_root_returns_empty():
+    with tempfile.TemporaryDirectory() as td:
+        missing = Path(td) / "not-created-yet"
+        files, errors = scan_local(missing, [])
+        assert files == {} and errors == []
+
+
+def test_resolve_subdir_stays_inside():
+    root = Path("/data/seagate")
+    assert resolve_subdir(root, "") == root
+    assert resolve_subdir(root, "   ") == root
+    assert resolve_subdir(root, "Backup/Study") == root / "Backup" / "Study"
+    assert resolve_subdir(root, "/Backup/") == root / "Backup"  # leading slash = relative
+    assert resolve_subdir(root, "..") is None
+    assert resolve_subdir(root, "a/../..") is None
+    assert resolve_subdir(root, "../etc") is None
 
 
 def test_disk_usage_reports_filesystem():
@@ -403,6 +422,33 @@ def test_safe_join_blocks_escape():
             pass
         else:
             raise AssertionError("expected ValueError for traversal path")
+
+
+def test_folder_listing_groups_and_filters():
+    items = [
+        _item("A/x.txt", DIFFERENT, local=_local("A/x.txt"), remote=_remote("A/x.txt", size=99)),
+        _item("A/B/y.txt", IDENTICAL, local=_local("A/B/y.txt"), remote=_remote("A/B/y.txt")),
+        _item("z.txt", LOCAL_ONLY, local=_local("z.txt")),
+        _item("doc", GOOGLE_NATIVE, remote=_remote("doc", size=None,
+              mime="application/vnd.google-apps.document")),
+    ]
+
+    # Root level: one subfolder "A" (2 files below, 1 differing) + 2 direct files.
+    subfolders, files = folder_listing(items, "")
+    assert subfolders == [("A", 2, 1)]
+    assert [it.relpath for it in files] == ["z.txt", "doc"]
+
+    # only_diff drops identical/native files; "A" stays (has a difference).
+    subfolders, files = folder_listing(items, "", only_diff=True)
+    assert subfolders == [("A", 2, 1)]
+    assert [it.relpath for it in files] == ["z.txt"]
+
+    # Inside "A": subfolder "B" (all identical -> filtered out by only_diff).
+    subfolders, files = folder_listing(items, "A")
+    assert subfolders == [("B", 1, 0)]
+    assert [it.relpath for it in files] == ["A/x.txt"]
+    subfolders, _files = folder_listing(items, "A", only_diff=True)
+    assert subfolders == []
 
 
 # --------------------------------------------------------------------------- #
