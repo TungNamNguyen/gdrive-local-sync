@@ -103,13 +103,17 @@ def _drive_display() -> str:
     return "My Drive (toàn bộ)" if root == "root" else root
 
 
+def _local_subdir() -> str:
+    return st.session_state.get("local_subdir", config.LOCAL_SUBDIR_DEFAULT)
+
+
 def _local_root():
     """The configured local folder (SEAGATE_PATH + subfolder); None if invalid."""
-    return resolve_subdir(config.SEAGATE_PATH, st.session_state.get("local_subdir", ""))
+    return resolve_subdir(config.SEAGATE_PATH, _local_subdir())
 
 
 def _local_display() -> str:
-    sub = st.session_state.get("local_subdir", "")
+    sub = _local_subdir()
     return f"Seagate/{sub}" if sub else "Seagate (toàn bộ ổ)"
 
 
@@ -175,13 +179,13 @@ def _render_sidebar() -> object | None:
 
     local_sub = st.sidebar.text_input(
         "Thư mục trên Seagate",
-        value=st.session_state.get("local_subdir", ""),
+        value=_local_subdir(),
         placeholder="(toàn bộ ổ)",
         help="Thư mục con trong ổ Seagate để so sánh/đồng bộ, ví dụ `Backup/Study`. "
         "Để trống = toàn bộ ổ. Luôn phải nằm trong ổ Seagate.",
     )
     local_sub = (local_sub or "").strip().strip("/")
-    if local_sub != st.session_state.get("local_subdir", ""):
+    if local_sub != _local_subdir():
         st.session_state["local_subdir"] = local_sub
         _abort_scan()
         _reset_comparison()
