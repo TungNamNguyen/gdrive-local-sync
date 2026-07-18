@@ -1,8 +1,9 @@
-# Seagate <-> Google Drive Sync
+# Local <-> Google Drive Sync
 
 A Streamlit web app that **compares and syncs** files between a locally mounted
-**Seagate** external drive and **Google Drive** (My Drive), deployed as a
-hardened Docker Compose service.
+drive (e.g. a Seagate external disk) and **Google Drive** (My Drive), deployed
+as a hardened Docker Compose service. Both sides are scoped freely from the
+sidebar: any Drive folder against any subfolder inside the mounted drive.
 
 ## Features
 
@@ -18,9 +19,13 @@ hardened Docker Compose service.
 - **Background execution** with live progress: files, bytes, speed, ETA, a
   Cancel button, and several files transferred in parallel. Dropped
   connections mid-transfer are retried automatically with backoff.
+- **Explorer**: after a scan, browse the merged folder tree of both sides —
+  drill into folders, see per-folder difference counts, filter by side or by
+  differences only.
 - **History** of every sync session stored in SQLite, exportable as CSV.
 - **Storage at a glance**: sidebar gauges show used/total space of both the
-  Seagate filesystem and the Google Drive quota.
+  Seagate filesystem and the Google Drive quota; the plan warns when a
+  download would not fit in the remaining free space.
 - **Safety**: deletions are always recoverable (Drive -> Trash, Seagate ->
   `.sync_trash/`); nothing is ever hard-deleted.
 
@@ -74,17 +79,22 @@ The app is not Google-verified, so the consent page shows a warning; click
 
 ## Usage
 
-1. **Compare** — click *Quet & So sanh*. The first scan is a full listing;
-   later scans are incremental (only changes are fetched). If a fast scan ever
-   looks wrong, click *Quet lai toan bo* (full rescan). Click *Dung quet* to
-   stop mid-scan — scanning only reads, so stopping is always safe; you just
-   get no comparison result and need to rescan.
-2. **Sync** — pick a direction and conflict policy -> *Lap ke hoach* to preview
-   the plan -> *Bat dau dong bo*. **Mirror** mode requires typing `XOA` to
-   confirm the deletions. The *Xuat file Google* checkbox (download directions
-   only) exports Docs/Sheets/Slides as Office copies on the Seagate side; the
-   copies are never uploaded back and the Drive originals are never touched.
-3. **History** — review past sessions, download CSV.
+1. **Compare** — in the sidebar pick the Drive root folder and the local
+   subfolder (empty = the whole drive; a not-yet-existing subfolder is created
+   on the first download), then click *Quet & So sanh*. The first scan is a
+   full listing; later scans are incremental (only changes are fetched). If a
+   fast scan ever looks wrong, click *Quet lai toan bo* (full rescan). Click
+   *Dung quet* to stop mid-scan — scanning only reads, so stopping is always
+   safe; you just get no comparison result and need to rescan.
+2. **Explore** — browse the merged tree of both sides, folder by folder, with
+   per-folder difference counts and side/difference filters.
+3. **Sync** — pick a direction (defaults to Drive -> local) and conflict
+   policy -> *Lap ke hoach* to preview the plan -> *Bat dau dong bo*.
+   **Mirror** mode requires typing `XOA` to confirm the deletions. The *Xuat
+   file Google* checkbox (download directions only) exports Docs/Sheets/Slides
+   as Office copies on the Seagate side; the copies are never uploaded back
+   and the Drive originals are never touched.
+4. **History** — review past sessions, download CSV.
 
 > **Do not modify either side** while a sync is running.
 
